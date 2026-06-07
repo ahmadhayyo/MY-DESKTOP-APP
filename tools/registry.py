@@ -373,6 +373,32 @@ def _load_web_search():
 _import_category("web_search", _load_web_search)
 
 
+# ═══════════════════════════════════════════════════════════
+# LONG-TERM MEMORY — durable facts the agent remembers across sessions
+# ═══════════════════════════════════════════════════════════
+def _load_memory_facts():
+    from tools.memory_facts_tools import (
+        remember_fact, recall_facts, forget_fact, list_memory,
+    )
+    return [remember_fact, recall_facts, forget_fact, list_memory]
+
+_import_category("memory_facts", _load_memory_facts)
+
+
+# ═══════════════════════════════════════════════════════════
+# SCHEDULER — recurring/one-off tasks that run through the agent
+# ═══════════════════════════════════════════════════════════
+def _load_scheduler():
+    from tools.scheduler_tools import (
+        schedule_task, list_scheduled_tasks,
+        cancel_scheduled_task, toggle_scheduled_task,
+    )
+    return [schedule_task, list_scheduled_tasks,
+            cancel_scheduled_task, toggle_scheduled_task]
+
+_import_category("scheduler", _load_scheduler)
+
+
 # ── Final exports ─────────────────────────────────────────────────────────────
 ALL_TOOLS: list[BaseTool] = _all_tools
 TOOLS_BY_NAME: dict[str, BaseTool] = {t.name: t for t in ALL_TOOLS}

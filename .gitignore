@@ -9,19 +9,21 @@ __pycache__/
 venv/
 .venv/
 
-# Local data (not source)
-agent_memory.db
-agent_memory.db-shm
-agent_memory.db-wal
-agent_memory.db.old.*
-conversations.db
-conversations.db-shm
-conversations.db-wal
-task_history.db
+# Local data (not source) — ALL SQLite databases + WAL/SHM sidecars are runtime
+# state, never source. Glob patterns catch every DB the app creates.
+*.db
+*.db-shm
+*.db-wal
+*.db.old.*
+*.sqlite
+*.sqlite3
 integrations.json
 last_session.json
+agent_facts.json
+scheduled_jobs.json
 .browser_profile/
 .files/
+logs/
 
 # Secrets
 .env

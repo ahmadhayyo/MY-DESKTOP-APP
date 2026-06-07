@@ -27,8 +27,7 @@ requests>=2.32.3
 # Async support
 aiofiles>=23.2.1
 
-# Web Search & Download
-duckduckgo-search>=6.0.0
+# Web Search & Download (ddgs is the maintained successor to duckduckgo-search)
 yt-dlp>=2024.1.0
 
 # Desktop GUI Automation (open apps, click, type, screenshot)

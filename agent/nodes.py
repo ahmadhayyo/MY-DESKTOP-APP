@@ -775,6 +775,12 @@ TOOL SELECTION RULES (choose the right tool from the start):
                                      Example plan for "نتيجة مباراة مصر والبرازيل أمس":
                                        1. web_answer(query='Egypt Brazil match result')
                                        (one step — read the snippets and answer directly)
+• Remember/recall user info        → remember_fact / recall_facts. At the start of a task,
+                                     recall_facts(query=...) to reuse known preferences/paths
+                                     instead of asking again. Save new durable info with remember_fact.
+• "remind me" / "every day" / "later"/ "بعد"/"كل يوم"/"ذكّرني"
+                                   → schedule_task(prompt=..., when=...). Use for any
+                                     time-based or recurring request.
 • Download song/audio by name      → download_audio_by_search (NOT browser, NOT PowerShell)
 • Download from a specific website → browser_open → browser_get_links → browser_click → browser_download_via_click
 • Download file from direct URL    → browser_download_to_desktop or download_file
@@ -1220,6 +1226,12 @@ def worker_node(state: AgentState) -> dict:
         "  🔄 تحويل الملفات: convert_file, get_supported_formats\n"
         "  🔍 الفحص: validate_document, file_info, file_compare, open_and_screenshot\n"
         "  ⬇️ التحميل المتقدم: download_with_progress, check_url_availability, get_file_hash\n"
+        "  🧠 الذاكرة الدائمة (عبر الجلسات): remember_fact(key, value, category), "
+        "recall_facts(query), forget_fact(key), list_memory()\n"
+        "     ← احفظ تفضيلات المستخدم والمسارات والمعلومات المتكررة، واسترجعها بدل سؤاله مجدداً.\n"
+        "  ⏰ الجدولة: schedule_task(prompt, when), list_scheduled_tasks(), "
+        "cancel_scheduled_task(job_id), toggle_scheduled_task(job_id, enabled)\n"
+        "     ← when: 'in 30 minutes'/'بعد ساعة'/'every day at 09:00'/'كل يوم 21:30'/'every 2 hours'.\n"
         "\n👁️ الرؤية (عيون الوكيل) — قراءة ما هو على الشاشة:\n"
         "  screen_read_text()                          ← اقرأ كل النصوص المرئية على الشاشة (OCR)\n"
         "  screen_find_text(text='...')                ← ابحث عن نص محدد واحصل على إحداثياته\n"
@@ -1442,10 +1454,18 @@ def worker_node(state: AgentState) -> dict:
             if not tool_fn:
                 result = f"❌ ERROR: Tool '{tool_name}' is not registered. Available tools: {list(TOOL_MAP.keys())}"
             else:
+                # Self-healing execution: transient failures (network blips, locked
+                # files, timeouts, rate limits) auto-retry with backoff; permanent
+                # failures come back with an actionable diagnostic instead of a raw
+                # traceback the model tends to loop on.
                 try:
-                    raw_result = tool_fn.invoke(tool_args)
+                    from core.resilience import run_tool_resiliently
+                    raw_result = run_tool_resiliently(tool_fn, tool_args, tool_name)
                 except Exception as exc:
                     raw_result = f"❌ ERROR running {tool_name}: {type(exc).__name__}: {exc}"
+                if isinstance(raw_result, str) and (
+                    raw_result.startswith("❌") or "[ERROR]" in raw_result
+                ):
                     error_logs.append(f"[task:{task_id}][{tool_name}] {raw_result[:300]}")
 
                 # ── Case A: Destructive command detected ─────────────────

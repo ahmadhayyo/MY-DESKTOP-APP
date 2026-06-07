@@ -893,6 +893,90 @@ async def _auto_continue_until_done(config: dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Background scheduler — runs due scheduled jobs through the agent
+# ─────────────────────────────────────────────────────────────────────────────
+_SCHEDULER_TASK = None  # asyncio.Task, started once per process
+
+
+def _start_scheduler_loop() -> None:
+    """Launch the scheduler polling loop once. Safe to call repeatedly."""
+    global _SCHEDULER_TASK
+    if _SCHEDULER_TASK is not None and not _SCHEDULER_TASK.done():
+        return
+    if str(os.getenv("SCHEDULER_ENABLED", "true")).lower() in ("false", "0", "no", "off"):
+        return
+    try:
+        import asyncio
+        _SCHEDULER_TASK = asyncio.create_task(_scheduler_loop())
+        _logger.info("⏰ Scheduler loop started")
+    except Exception as exc:
+        _logger.warning("Scheduler loop not started: %s", exc)
+
+
+async def _scheduler_loop() -> None:
+    """
+    Every 60s, run any due scheduled jobs through the agent graph on a dedicated
+    'scheduler' thread, then post the result to the chat. Best-effort: a failure
+    in one job never stops the loop.
+    """
+    import asyncio
+    from core import scheduler as _sched
+
+    poll = int(os.getenv("SCHEDULER_POLL_SECONDS", "60"))
+    while True:
+        try:
+            due = _sched.due_jobs()
+            for job in due:
+                await _run_scheduled_job(job)
+        except Exception as exc:
+            _logger.warning("Scheduler tick error: %s", exc)
+        await asyncio.sleep(poll)
+
+
+async def _run_scheduled_job(job: dict) -> None:
+    """Execute one scheduled job through the agent and report the outcome."""
+    from core import scheduler as _sched
+    global GRAPH
+    if GRAPH is None:
+        GRAPH = _get_graph()
+
+    job_id = job.get("id", "?")
+    title = job.get("title", "")
+    prompt = job.get("prompt", "")
+
+    try:
+        await cl.Message(
+            content=f"⏰ **مهمة مجدولة بدأت** — {title}\n> {prompt}"
+        ).send()
+    except Exception:
+        pass
+
+    # Run on an isolated thread so scheduled work never collides with the user's
+    # current conversation state.
+    try:
+        _max_iter = int(os.getenv("MAX_ITERATIONS", "100"))
+    except (TypeError, ValueError):
+        _max_iter = 100
+    sched_config = {
+        "configurable": {"thread_id": f"scheduler-{job_id}"},
+        "recursion_limit": max(50, _max_iter * 2 + 25),
+    }
+
+    try:
+        inputs = {"messages": [HumanMessage(content=prompt)]}
+        await _run_graph(inputs, sched_config)
+        await _handle_hitl_loop(sched_config)
+        await _auto_continue_until_done(sched_config)
+        _sched.mark_ran(job_id, ok=True)
+    except Exception as exc:
+        _sched.mark_ran(job_id, ok=False, note=str(exc))
+        try:
+            await cl.Message(content=f"❌ فشلت المهمة المجدولة {job_id}: {exc}").send()
+        except Exception:
+            pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Chainlit hooks
 # ─────────────────────────────────────────────────────────────────────────────
 @cl.on_chat_start
@@ -900,6 +984,9 @@ async def on_chat_start() -> None:
     """Generate or restore a session thread_id and set up model selector."""
     global GRAPH
     GRAPH = _get_graph()
+
+    # ── Start the background scheduler loop (once per session) ─────────────
+    _start_scheduler_loop()
 
     # ── Voice defaults ────────────────────────────────────────────────────
     cl.user_session.set("voice_mode", False)

@@ -23,11 +23,31 @@ ENV_PATH: Path = ROOT_DIR / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=False)
 
 # ── Logging ──────────────────────────────────────────────────────────────────
+# Console + a rotating file handler so past runs can be debugged after the fact
+# (previously logs were console-only and lost the moment the app closed).
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_DIR: Path = ROOT_DIR / "logs"
+_log_handlers: list[logging.Handler] = [logging.StreamHandler()]
+try:
+    from logging.handlers import RotatingFileHandler
+
+    LOG_DIR.mkdir(exist_ok=True)
+    _file_handler = RotatingFileHandler(
+        LOG_DIR / "hayo.log",
+        maxBytes=int(os.getenv("LOG_MAX_BYTES", str(5 * 1024 * 1024))),  # 5 MB
+        backupCount=int(os.getenv("LOG_BACKUP_COUNT", "5")),
+        encoding="utf-8",
+    )
+    _log_handlers.append(_file_handler)
+except Exception:
+    # File logging is best-effort; never block startup on it.
+    pass
+
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%H:%M:%S",
+    handlers=_log_handlers,
 )
 logger = logging.getLogger("hayo")
 
