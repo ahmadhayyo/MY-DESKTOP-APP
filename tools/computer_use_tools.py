@@ -241,20 +241,27 @@ def screen_describe(region: str = "") -> str:
 
             lines.append("\n💡 للتفاعل: app_interact(action='click', target='النص') أو app_interact(action='type', text='...')")
 
-            # ── CAPTCHA detection ──────────────────────────────────────
+            # ── CAPTCHA detection (INFORMATIONAL ONLY — never triggers HITL) ──
+            # screen_describe is a PASSIVE "look at the screen" tool. It must NOT
+            # emit the "CAPTCHA_DETECTED" sentinel that pauses the graph for the
+            # user — otherwise an unrelated leftover window (e.g. an old Replit
+            # tab still showing a CAPTCHA) would hijack EVERY new task.
+            # Use narrow, high-precision phrases to avoid false positives from
+            # ordinary words like "verify email" / "human resources".
             all_text_lower = " ".join(e['text'] for e in elements).lower()
-            captcha_keywords = [
-                'captcha', 'recaptcha', 'verify', "i'm not a robot",
-                "i am not a robot", 'robot', 'human', 'challenge',
-                'prove', 'تحقق', 'لست روبوتاً', 'لست آلة', 'بشري',
+            captcha_phrases = [
+                'recaptcha', 'hcaptcha', "i'm not a robot", "i am not a robot",
+                'verify you are human', 'select all images', 'لست روبوت',
+                'أنا لست روبوت', 'تحقّق من أنك إنسان',
             ]
-            captcha_found = [kw for kw in captcha_keywords if kw in all_text_lower]
+            captcha_found = [kw for kw in captcha_phrases if kw in all_text_lower]
             if captcha_found:
                 lines.append(
-                    f"\n🔒 CAPTCHA_DETECTED — تم اكتشاف CAPTCHA على الشاشة!\n"
-                    f"   الكلمات المكتشفة: {', '.join(captcha_found)}\n"
-                    f"   الإجراء المطلوب: يرجى حل الـ CAPTCHA يدوياً، ثم أبلغني لأكمل المهمة.\n"
-                    f"   أو للحل التلقائي (CAPTCHA نصي فقط): solve_text_captcha()"
+                    f"\nℹ️ ملاحظة: يبدو أن هناك CAPTCHA مرئياً على الشاشة "
+                    f"(عبارات: {', '.join(captcha_found)}).\n"
+                    f"   إن كانت المهمة الحالية تتطلب تجاوزه: "
+                    f"handle_verification_screen(timeout_seconds=90).\n"
+                    f"   وإلا تجاهله — قد يكون من نافذة قديمة لا علاقة لها بمهمتك."
                 )
 
         except Exception as e:

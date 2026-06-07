@@ -137,9 +137,12 @@ def run_powershell(
             except Exception:
                 clean = "(OCR غير متاح)"
 
-            # CAPTCHA detection
-            captcha_kws = ['captcha', 'recaptcha', 'verify', 'i am not a robot',
-                           "i'm not a robot", 'robot', 'تحقق', 'لست روبوتاً']
+            # CAPTCHA detection — high-precision phrases only (no false positives
+            # from ordinary words like "verify"/"robot"). Informational, never a
+            # HITL trigger: this auto-screenshot fires after EVERY launch command,
+            # so it must not hijack unrelated tasks because a stale window is open.
+            captcha_kws = ['recaptcha', 'hcaptcha', 'i am not a robot',
+                           "i'm not a robot", 'verify you are human', 'لست روبوت']
             captcha_hit = next((k for k in captcha_kws if k in screen_text.lower()), None)
 
             # Title-based Cloudflare detection (reliable even if OCR empty)
@@ -154,14 +157,14 @@ def run_powershell(
             )
             if cf_title_hit:
                 screen_section += (
-                    f"\n\n🛡️ شاشة تحقق Cloudflare مكتشفة من العنوان («{cf_title_hit}»)!"
-                    f"\n   الإجراء التالي الإلزامي: handle_verification_screen(timeout_seconds=90)"
+                    f"\n\n🛡️ شاشة تحقق Cloudflare مكتشفة من العنوان («{cf_title_hit}»)."
+                    f"\n   إن كانت مهمتك الحالية تتطلب هذا التطبيق: "
+                    f"handle_verification_screen(timeout_seconds=90)"
                 )
             elif captcha_hit:
                 screen_section += (
-                    f"\n\n🔒 CAPTCHA_DETECTED — تم اكتشاف CAPTCHA!"
-                    f"\n   الإجراء التالي: handle_verification_screen(timeout_seconds=90)"
-                    f"\n   أو حله يدوياً ثم أبلغ الوكيل للاستمرار."
+                    f"\n\nℹ️ ملاحظة: يبدو وجود CAPTCHA على الشاشة (عبارة: «{captcha_hit}»)."
+                    f"\n   إن كانت مهمتك تتطلب تجاوزه: handle_verification_screen(timeout_seconds=90)."
                 )
             result += screen_section
         except Exception as _e:

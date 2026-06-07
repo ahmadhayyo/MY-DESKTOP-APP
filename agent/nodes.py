@@ -1904,8 +1904,27 @@ def reviewer_node(state: AgentState) -> dict:
             metadata={**existing_meta, "_original_verdict": raw_content},
         )
 
+    # Determine the verdict deterministically and store it as a STABLE tag at the
+    # front of the completed_steps entry. We use rfind so any echoed system-prompt
+    # preamble (DeepSeek sometimes repeats context) doesn't hide the real verdict.
+    # app.py's autonomous-completion loop reads this tag to decide whether to keep
+    # the agent working — so it must be reliable and not truncated away.
+    _up = raw_content.upper()
+    _tc = _up.rfind("TASK_COMPLETE")
+    _fl = _up.rfind("FAILED")
+    _co = _up.rfind("CONTINUE")
+    _verdict_tag = "CONTINUE"
+    _best = max(_tc, _fl, _co)
+    if _best >= 0:
+        if _best == _tc:
+            _verdict_tag = "TASK_COMPLETE"
+        elif _best == _fl:
+            _verdict_tag = "FAILED"
+        else:
+            _verdict_tag = "CONTINUE"
+
     completed = list(completed_steps)
-    completed.append(f"[Review] {raw_content[:120]}")
+    completed.append(f"[Review:{_verdict_tag}] {raw_content[:120]}")
 
     return {
         "messages":                messages + [response],

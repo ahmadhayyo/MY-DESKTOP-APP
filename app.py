@@ -585,9 +585,21 @@ async def _run_graph(input_or_command, config: dict) -> None:
                 continue
 
     except Exception as exc:
-        await cl.Message(
-            content=f"❌ **خطأ في التنفيذ**: {type(exc).__name__}: {exc}"
-        ).send()
+        # GraphRecursionError = LangGraph step ceiling. With recursion_limit now
+        # set well above 2*MAX_ITERATIONS this should be rare, but if a task is
+        # genuinely huge, tell the user how to continue instead of a raw trace.
+        if type(exc).__name__ == "GraphRecursionError":
+            await cl.Message(
+                content=(
+                    "⏸️ **المهمة طويلة جداً ووصلت حد الخطوات المؤقت.**\n\n"
+                    "أنجزت جزءاً كبيراً — اكتب **أكمل** لأتابع من حيث توقفت حتى الانتهاء.\n"
+                    "_(لرفع الحد دائماً: `/settings set MAX_ITERATIONS 200`)_"
+                )
+            ).send()
+        else:
+            await cl.Message(
+                content=f"❌ **خطأ في التنفيذ**: {type(exc).__name__}: {exc}"
+            ).send()
 
     finally:
         # ── Flush any remaining partial line ─────────────────────────────
@@ -745,6 +757,139 @@ async def _handle_hitl_loop(config: dict) -> None:
             ).send()
             user_response = res.get("output", "continue") if res else "continue"
             await _run_graph(Command(resume=user_response), config)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Autonomous completion — keep working until the task is genuinely done
+# ─────────────────────────────────────────────────────────────────────────────
+def _verdict_from_state(values: dict) -> str:
+    """
+    Determine the task verdict from graph state: 'complete' | 'failed' | 'incomplete'.
+
+    The reviewer appends '[Review] <RAW_VERDICT>' to completed_steps every run, and
+    RAW_VERDICT starts with TASK_COMPLETE:/FAILED:/CONTINUE:. completed_steps is a
+    plain list of strings (fully serializable), so this survives checkpoint reload —
+    unlike message .metadata which may not round-trip through SQLite.
+    """
+    plan = values.get("plan", [])
+    if plan and plan[0] == "CONVERSATIONAL_ONLY":
+        return "complete"   # a chat reply is a complete "task"
+    # The reviewer tags its entry as [Review:TASK_COMPLETE] / [Review:FAILED] /
+    # [Review:CONTINUE] (verdict never truncated). Read the most recent one.
+    for step in reversed(values.get("completed_steps", [])):
+        if isinstance(step, str) and step.startswith("[Review:"):
+            tag = step[8:step.find("]")] if "]" in step else ""
+            tag = tag.strip().upper()
+            if tag == "TASK_COMPLETE":
+                return "complete"
+            if tag == "FAILED":
+                return "failed"
+            return "incomplete"   # CONTINUE → not done yet
+        # Back-compat: older "[Review] ..." entries without a tag
+        if isinstance(step, str) and step.startswith("[Review]"):
+            up = step.upper()
+            if "TASK_COMPLETE" in up:
+                return "complete"
+            if "FAILED" in up:
+                return "failed"
+            return "incomplete"
+    return "incomplete"
+
+
+def _progress_fingerprint(values: dict) -> str:
+    """A cheap signal of forward progress, to detect a stalled agent."""
+    msgs = values.get("messages", [])
+    last_ai = ""
+    for m in reversed(msgs):
+        if isinstance(m, AIMessage) and not getattr(m, "tool_calls", []):
+            last_ai = (m.content if isinstance(m.content, str) else "")[:160]
+            break
+    return f"{len(msgs)}|{last_ai}"
+
+
+async def _auto_continue_until_done(config: dict) -> None:
+    """
+    Keep the agent working autonomously until the task is genuinely complete,
+    so the user never has to type "أكمل" mid-task.
+
+    After each graph run we inspect the state. If the reviewer did NOT emit
+    TASK_COMPLETE/FAILED (i.e. it stopped on the MAX_ITERATIONS ceiling or a
+    loop guard), we automatically resume with a "continue" instruction.
+
+    Stops auto-continuing when ANY of these hold:
+      • verdict is TASK_COMPLETE or FAILED (genuinely done), OR
+      • a HITL interrupt is pending (needs the user — approval/CAPTCHA), OR
+      • two rounds in a row make no forward progress (stuck), OR
+      • the hard round cap is reached (runaway safety).
+
+    Disable by setting AUTO_CONTINUE=false in .env.
+    """
+    global GRAPH
+    if GRAPH is None:
+        GRAPH = _get_graph()
+
+    if str(os.getenv("AUTO_CONTINUE", "true")).lower() in ("false", "0", "no", "off"):
+        return
+
+    try:
+        max_rounds = int(os.getenv("AUTO_CONTINUE_MAX_ROUNDS", "10"))
+    except (TypeError, ValueError):
+        max_rounds = 10
+
+    last_fp = None
+    stalls = 0
+
+    for round_idx in range(max_rounds):
+        state = await GRAPH.aget_state(config)
+
+        # HITL interrupt pending → the user must act; never auto-skip it.
+        if state.next:
+            return
+
+        values = state.values or {}
+        verdict = _verdict_from_state(values)
+        if verdict in ("complete", "failed"):
+            return   # genuinely finished — stop here
+
+        # Stall detection: no forward progress across two rounds.
+        fp = _progress_fingerprint(values)
+        if fp == last_fp:
+            stalls += 1
+            if stalls >= 2:
+                await cl.Message(
+                    content=(
+                        "⏸️ توقف الوكيل دون إحراز تقدم جديد. "
+                        "قد يحتاج تدخّلاً منك أو إعادة صياغة المهمة."
+                    )
+                ).send()
+                return
+        else:
+            stalls = 0
+        last_fp = fp
+
+        # Auto-resume: re-enter the graph with a continue instruction.
+        await cl.Message(
+            content=f"🔄 الوكيل يتابع المهمة تلقائياً… (جولة {round_idx + 1})"
+        ).send()
+        cont_inputs = {
+            "messages": [
+                HumanMessage(content=(
+                    "تابع العمل على نفس المهمة من حيث توقفت بالضبط — لا تبدأ من جديد. "
+                    "أكمل كل الخطوات المتبقية حتى تكتمل المهمة بالكامل، ثم اكتب التقرير النهائي. "
+                    "إذا لم يتبقَّ شيء فاكتب TASK_COMPLETE مع التقرير."
+                ))
+            ]
+        }
+        await _run_graph(cont_inputs, config)
+        await _handle_hitl_loop(config)
+
+    # Hard cap reached — extremely long task.
+    await cl.Message(
+        content=(
+            "⏸️ المهمة طويلة جداً ووصلت الحد الأقصى للمتابعة التلقائية. "
+            "اكتب **أكمل** لمواصلة العمل."
+        )
+    ).send()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1028,7 +1173,22 @@ async def on_message(message: cl.Message) -> None:
     GRAPH = _get_graph()
 
     thread_id: str = cl.user_session.get("thread_id")
-    config: dict = {"configurable": {"thread_id": thread_id}}
+    # ── recursion_limit: must exceed what MAX_ITERATIONS consumes ──────────────
+    # The graph cycles planner→worker→reviewer→worker→reviewer…; each agent
+    # iteration costs ~2 LangGraph super-steps (worker + reviewer). LangGraph's
+    # DEFAULT recursion_limit is only 25 → it would raise GraphRecursionError
+    # after ~12 iterations, stopping the agent mid-task (the user then had to
+    # type "أكمل"). We set it well above 2*MAX_ITERATIONS so the graceful
+    # MAX_ITERATIONS ceiling in nodes.py is what actually stops the run.
+    try:
+        _max_iter = int(os.getenv("MAX_ITERATIONS", "100"))
+    except (TypeError, ValueError):
+        _max_iter = 100
+    _recursion_limit = max(50, _max_iter * 2 + 25)
+    config: dict = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": _recursion_limit,
+    }
     _save_session(thread_id)
 
     user_text = message.content.strip()
@@ -1381,6 +1541,7 @@ async def on_message(message: cl.Message) -> None:
                 await cl.Message(content="▶️ جارٍ الاستئناف من حيث توقفت…").send()
                 await _run_graph(Command(resume="continue"), config)
                 await _handle_hitl_loop(config)
+                await _auto_continue_until_done(config)
                 return
             elif state and state.values.get("plan") and state.values.get("iteration_count", 0) > 0:  # noqa: E501
                 await cl.Message(content="🔁 جارٍ متابعة المهمة السابقة…").send()
@@ -1393,6 +1554,7 @@ async def on_message(message: cl.Message) -> None:
                 }
                 await _run_graph(inputs, config)
                 await _handle_hitl_loop(config)
+                await _auto_continue_until_done(config)
                 return
         except Exception:
             pass
@@ -1447,6 +1609,31 @@ async def on_message(message: cl.Message) -> None:
     else:
         msg_content = full_text
 
+    # ── Abandon any stale pending interrupt from a previous task ──────────────
+    # If the last task left a HITL interrupt pending (e.g. a CAPTCHA prompt the
+    # user dismissed) and the user is now starting a NEW task (continue/resume
+    # requests already returned above), reusing the same graph thread would make
+    # LangGraph RESUME the old interrupt — so every new command looks "stuck" on
+    # the previous task. Switch to a fresh graph thread so the new task starts
+    # clean. (Chainlit UI history stays visible; only the stuck graph state is
+    # dropped — which is exactly what the user wants for a different task.)
+    try:
+        _pending = await GRAPH.aget_state(config)
+        if _pending and _pending.next:
+            _fresh_tid = str(uuid.uuid4())
+            cl.user_session.set("thread_id", _fresh_tid)
+            thread_id = _fresh_tid
+            config = {
+                "configurable": {"thread_id": _fresh_tid},
+                "recursion_limit": _recursion_limit,
+            }
+            _save_session(_fresh_tid, cl.user_session.get("current_provider", _PROVIDER))
+            await cl.Message(
+                content="🆕 بدأت مهمة جديدة — أُلغيت المهمة المعلّقة السابقة."
+            ).send()
+    except Exception:
+        pass
+
     # ── Initial graph run (with task tracking + desktop notifications) ────────
     import time as _time
     from core.task_history import start_task, finish_task
@@ -1461,6 +1648,9 @@ async def on_message(message: cl.Message) -> None:
     inputs = {"messages": [HumanMessage(content=msg_content)]}
     await _run_graph(inputs, config)
     await _handle_hitl_loop(config)
+    # Keep working autonomously until the task is genuinely complete — the user
+    # should never have to type "أكمل" mid-task. (Disable via AUTO_CONTINUE=false.)
+    await _auto_continue_until_done(config)
 
     # Finish task tracking
     _task_elapsed = _time.time() - _task_start
