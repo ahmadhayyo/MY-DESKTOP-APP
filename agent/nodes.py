@@ -798,6 +798,16 @@ TOOL SELECTION RULES (choose the right tool from the start):
 • Open app + auto-login            → open_app_and_login(app_or_url=..., username=..., password=...)
 • Solve text CAPTCHA on screen     → solve_text_captcha(region='x,y,w,h')
 • Type Arabic/Unicode safely       → type_text_clipboard(text='...')
+• Office work (Word/Excel/PowerPoint) → build the file directly with library tools
+  (no need to open the app). Typical multi-step plans:
+    Excel report: excel_create(data) → excel_set_formula / excel_add_total_row →
+                  excel_add_chart → excel_style_report (one-call professional styling)
+    Word report:  word_add_heading → word_add_paragraph → word_add_table →
+                  word_add_list → word_set_rtl (for Arabic)
+    PowerPoint:   ppt_create(title) → ppt_add_bullets / ppt_add_table / ppt_add_chart
+                  (one slide per call) → ppt_set_theme(color, font)
+  Then optionally convert to PDF (convert_excel_to_pdf / convert_word_to_pdf / ppt_to_pdf)
+  and open the result with open_app or launch_app_smart so the user can review it.
 • Open Windows Settings page       → open_settings_page(page='display'/'sound'/...)
 • Lock / sleep / restart PC        → power_action(action='lock'/'sleep'/'restart')
 • Change desktop wallpaper         → set_wallpaper(image_path='C:/...')
@@ -1213,7 +1223,15 @@ def worker_node(state: AgentState) -> dict:
         "  📋 الحافظة: clipboard_get, clipboard_set\n"
         "  🌍 الشبكة: get_network_info, ping_host, check_port, dns_lookup\n"
         "  🔊 الصوت: volume_control, text_to_speech, show_notification\n"
-        "  📄 المكتبية: excel_create/read/edit, word_create/read/edit, pdf_read/create/merge\n"
+        "  📄 المكتبية الأساسية: excel_create/read/edit, word_create/read/edit, pdf_read/create/merge\n"
+        "  📊 Excel احترافي: excel_set_formula, excel_add_total_row, excel_add_chart, "
+        "excel_format_range, excel_style_report (تنسيق كامل بنقرة), excel_highlight, "
+        "excel_autofit, excel_freeze_header, excel_add_sheet\n"
+        "  📝 Word احترافي: word_add_heading, word_add_paragraph, word_add_table, "
+        "word_add_image, word_add_list, word_add_page_break, word_set_header_footer, word_set_rtl\n"
+        "  📽️ PowerPoint: ppt_create, ppt_add_bullets, ppt_add_table, ppt_add_chart, "
+        "ppt_add_image, ppt_add_slide, ppt_set_theme, ppt_read, ppt_edit_text, ppt_info, ppt_to_pdf\n"
+        "     ← لإنشاء عرض: ppt_create() ثم أضف الشرائح واحدة تلو الأخرى، وأخيراً ppt_set_theme().\n"
         "  🌐 الترجمة: translate_text, excel_clone_translated, word_clone_translated\n"
         "     اللغات: ar, hi, en, fr, es, de, tr, fa, ur, zh-CN, ja, ko\n"
         "  💻 البرمجة: create_project, run_python, run_script, edit_file_lines\n"

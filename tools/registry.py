@@ -167,6 +167,54 @@ def _load_office():
 
 _import_category("office", _load_office)
 
+
+# ═══════════════════════════════════════════════════════════
+# POWERPOINT — full presentation creation & editing
+# ═══════════════════════════════════════════════════════════
+def _load_powerpoint():
+    from tools.powerpoint_tools import (
+        ppt_create, ppt_add_slide, ppt_add_bullets, ppt_add_image,
+        ppt_add_table, ppt_add_chart, ppt_read, ppt_edit_text,
+        ppt_set_theme, ppt_info, ppt_to_pdf,
+    )
+    return [ppt_create, ppt_add_slide, ppt_add_bullets, ppt_add_image,
+            ppt_add_table, ppt_add_chart, ppt_read, ppt_edit_text,
+            ppt_set_theme, ppt_info, ppt_to_pdf]
+
+_import_category("powerpoint", _load_powerpoint)
+
+
+# ═══════════════════════════════════════════════════════════
+# EXCEL PRO — formatting, formulas, charts, conditional formatting
+# ═══════════════════════════════════════════════════════════
+def _load_excel_pro():
+    from tools.excel_pro_tools import (
+        excel_format_range, excel_set_formula, excel_add_total_row,
+        excel_add_chart, excel_autofit, excel_freeze_header,
+        excel_highlight, excel_add_sheet, excel_style_report,
+    )
+    return [excel_format_range, excel_set_formula, excel_add_total_row,
+            excel_add_chart, excel_autofit, excel_freeze_header,
+            excel_highlight, excel_add_sheet, excel_style_report]
+
+_import_category("excel_pro", _load_excel_pro)
+
+
+# ═══════════════════════════════════════════════════════════
+# WORD PRO — headings, tables, images, lists, RTL
+# ═══════════════════════════════════════════════════════════
+def _load_word_pro():
+    from tools.word_pro_tools import (
+        word_add_heading, word_add_paragraph, word_add_table,
+        word_add_image, word_add_list, word_add_page_break,
+        word_set_header_footer, word_set_rtl,
+    )
+    return [word_add_heading, word_add_paragraph, word_add_table,
+            word_add_image, word_add_list, word_add_page_break,
+            word_set_header_footer, word_set_rtl]
+
+_import_category("word_pro", _load_word_pro)
+
 # ═══════════════════════════════════════════════════════════
 # ADVANCED DOWNLOAD (with progress, retry, integrity)
 # ═══════════════════════════════════════════════════════════
