@@ -298,6 +298,44 @@ def _load_archive():
 
 _import_category("archive", _load_archive)
 
+# ═══════════════════════════════════════════════════════════
+# VISION — Screen reading & OCR (agent "eyes")
+# ═══════════════════════════════════════════════════════════
+def _load_vision():
+    from tools.vision_tools import (
+        screen_read_text, screen_find_text, screen_find_and_click,
+        screen_wait_for_text, screen_get_pixel_color,
+        screen_capture_region, screen_compare_changes,
+    )
+    return [
+        screen_read_text, screen_find_text, screen_find_and_click,
+        screen_wait_for_text, screen_get_pixel_color,
+        screen_capture_region, screen_compare_changes,
+    ]
+
+_import_category("vision", _load_vision)
+
+# ═══════════════════════════════════════════════════════════
+# WINDOWS POWER — Deep Windows OS control
+# ═══════════════════════════════════════════════════════════
+def _load_windows():
+    from tools.windows_tools import (
+        windows_search, window_manager, get_active_window,
+        type_in_window, drag_and_drop, open_settings_page,
+        power_action, manage_startup_apps, set_wallpaper,
+        get_system_details, run_as_admin,
+        windows_toast_notification, scroll_in_window, app_exists,
+    )
+    return [
+        windows_search, window_manager, get_active_window,
+        type_in_window, drag_and_drop, open_settings_page,
+        power_action, manage_startup_apps, set_wallpaper,
+        get_system_details, run_as_admin,
+        windows_toast_notification, scroll_in_window, app_exists,
+    ]
+
+_import_category("windows", _load_windows)
+
 
 # ── Final exports ─────────────────────────────────────────────────────────────
 ALL_TOOLS: list[BaseTool] = _all_tools
