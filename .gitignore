@@ -37,3 +37,9 @@ Thumbs.db
 # Test artifacts
 test_voice.mp3
 *.tmp
+
+# Build artifacts (PyInstaller etc.) — not source
+build/
+dist/
+*.spec
+*.exe
