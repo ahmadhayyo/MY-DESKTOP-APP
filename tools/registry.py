@@ -325,6 +325,7 @@ def _load_windows():
         power_action, manage_startup_apps, set_wallpaper,
         get_system_details, run_as_admin,
         windows_toast_notification, scroll_in_window, app_exists,
+        launch_app_smart,
     )
     return [
         windows_search, window_manager, get_active_window,
@@ -332,9 +333,44 @@ def _load_windows():
         power_action, manage_startup_apps, set_wallpaper,
         get_system_details, run_as_admin,
         windows_toast_notification, scroll_in_window, app_exists,
+        launch_app_smart,
     ]
 
 _import_category("windows", _load_windows)
+
+
+# ═══════════════════════════════════════════════════════════
+# Computer Use — High-level app/desktop interaction
+# ═══════════════════════════════════════════════════════════
+def _load_computer_use():
+    from tools.computer_use_tools import (
+        screen_describe,
+        app_interact,
+        open_app_and_login,
+        solve_text_captcha,
+        type_text_clipboard,
+        handle_verification_screen,
+    )
+    return [
+        screen_describe,
+        app_interact,
+        open_app_and_login,
+        solve_text_captcha,
+        type_text_clipboard,
+        handle_verification_screen,
+    ]
+
+_import_category("computer_use", _load_computer_use)
+
+
+# ═══════════════════════════════════════════════════════════
+# WEB SEARCH — CAPTCHA-free, VPN-safe search (DuckDuckGo lite)
+# ═══════════════════════════════════════════════════════════
+def _load_web_search():
+    from tools.web_search_tools import web_search, web_answer
+    return [web_search, web_answer]
+
+_import_category("web_search", _load_web_search)
 
 
 # ── Final exports ─────────────────────────────────────────────────────────────

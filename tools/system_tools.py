@@ -108,7 +108,66 @@ def run_powershell(
     combined = redact_secrets(combined)
 
     header = f"[exit={completed.returncode}{' truncated' if truncated else ''}]\n"
-    return header + combined
+    result = header + combined
+
+    # ── Auto screen-check after app launch commands ───────────────────────────
+    # If the command launched an app (Start-Process or explorer.exe shell:AppsFolder),
+    # automatically wait and describe the screen so the agent always sees what opened.
+    _is_launch_cmd = any(kw in command for kw in [
+        "Start-Process", "shell:AppsFolder", "start-process",
+    ])
+    if _is_launch_cmd and completed.returncode == 0:
+        try:
+            import time as _time
+            import pyautogui as _pag
+            import pygetwindow as _gw
+
+            _time.sleep(3.5)   # let the app window appear
+
+            # Take screenshot + native OCR
+            shot = _pag.screenshot()
+            active = _gw.getActiveWindowTitle() or "(غير معروف)"
+            screen_text = ""
+            try:
+                from tools.ocr_engine import ocr_text as _ocr_text_fn
+                screen_text = _ocr_text_fn(shot)
+                clean = "\n".join(l for l in screen_text.splitlines() if l.strip())[:500]
+                if not clean.strip():
+                    clean = "(لم يُقرأ نص)"
+            except Exception:
+                clean = "(OCR غير متاح)"
+
+            # CAPTCHA detection
+            captcha_kws = ['captcha', 'recaptcha', 'verify', 'i am not a robot',
+                           "i'm not a robot", 'robot', 'تحقق', 'لست روبوتاً']
+            captcha_hit = next((k for k in captcha_kws if k in screen_text.lower()), None)
+
+            # Title-based Cloudflare detection (reliable even if OCR empty)
+            _cf_title_kws = ['لحظة', 'just a moment', 'checking your browser',
+                             'moment...', 'cloudflare', 'verifying']
+            cf_title_hit = next((k for k in _cf_title_kws if k in active.lower()), None)
+
+            screen_section = (
+                f"\n\n📸 [تحقق تلقائي بعد الإطلاق]\n"
+                f"النافذة النشطة: «{active}»\n"
+                f"الشاشة تُظهر:\n{clean}"
+            )
+            if cf_title_hit:
+                screen_section += (
+                    f"\n\n🛡️ شاشة تحقق Cloudflare مكتشفة من العنوان («{cf_title_hit}»)!"
+                    f"\n   الإجراء التالي الإلزامي: handle_verification_screen(timeout_seconds=90)"
+                )
+            elif captcha_hit:
+                screen_section += (
+                    f"\n\n🔒 CAPTCHA_DETECTED — تم اكتشاف CAPTCHA!"
+                    f"\n   الإجراء التالي: handle_verification_screen(timeout_seconds=90)"
+                    f"\n   أو حله يدوياً ثم أبلغ الوكيل للاستمرار."
+                )
+            result += screen_section
+        except Exception as _e:
+            result += f"\n\n📸 [تحقق تلقائي]: تعذر ({_e})"
+
+    return result
 
 
 @tool

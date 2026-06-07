@@ -40,43 +40,27 @@ def _pil_to_base64(img) -> str:
 
 
 def _ocr_image(img) -> str:
-    """Run OCR on a PIL image. Falls back gracefully if pytesseract not installed."""
+    """
+    Run OCR on a PIL image using the unified engine.
+    Primary: native Windows OCR (Windows.Media.Ocr). Fallback: tesseract.
+    """
     try:
-        import pytesseract
-        # Try common Tesseract install paths on Windows
-        import os
-        for path in [
-            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-        ]:
-            if os.path.exists(path):
-                pytesseract.pytesseract.tesseract_cmd = path
-                break
-        text = pytesseract.image_to_string(img, lang="ara+eng")
-        return text.strip()
-    except ImportError:
-        return "[OCR unavailable: install tesseract + pytesseract]"
+        from tools.ocr_engine import ocr_text
+        text = ocr_text(img)
+        if text and text.strip():
+            return text.strip()
+        return "[OCR: لم يُقرأ نص من الصورة]"
     except Exception as exc:
-        # Fall back to basic image analysis without Tesseract
         return f"[OCR error: {exc}]"
 
 
 def _cv2_find_text_coords(img_pil, text: str) -> Optional[tuple[int, int]]:
-    """Use template matching to find text in screenshot (requires pytesseract)."""
+    """Find the center coords of text on screen via the unified OCR engine."""
     try:
-        import pytesseract
-        import numpy as np
-        import cv2
-
-        data = pytesseract.image_to_data(img_pil, output_type=pytesseract.Output.DICT, lang="ara+eng")
-        for i, word in enumerate(data["text"]):
-            if text.lower() in word.lower() and int(data["conf"][i]) > 30:
-                x = data["left"][i] + data["width"][i] // 2
-                y = data["top"][i] + data["height"][i] // 2
-                return (x, y)
+        from tools.ocr_engine import ocr_find
+        return ocr_find(text, image=img_pil)
     except Exception:
-        pass
-    return None
+        return None
 
 
 # ── tools ─────────────────────────────────────────────────────────────────────

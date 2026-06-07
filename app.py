@@ -228,10 +228,15 @@ _INTERNAL_MARKERS = (
     "Worker failed to call any tool",
     "SKIPPED: Tool",
     "[INTERNAL",
+    "[Internal note]",       # _sanitize_messages converts SystemMsg → AIMsg with this prefix
+    "[internal note]",
     "DO NOT SHOW TO USER",
     "[PROGRESS SNAPSHOT]",
     "Plan steps:",
+    "Completed steps:",      # progress_note section header
+    "Completed:  ",          # progress_note field (two spaces after colon)
     "⏭️ SKIPPED:",
+    "REPLAN:",
     # DeepSeek DSML tags
     "<｜｜DSML｜｜",
     "</｜｜DSML｜｜",
@@ -348,19 +353,23 @@ async def _run_graph(input_or_command, config: dict) -> None:
     await response_msg.send()
 
     # ── Step handles ─────────────────────────────────────────────────────────
-    active_step:      cl.Step | None = None   # top-level phase (plan/execute/review)
-    worker_step:      cl.Step | None = None   # current tool sub-step
+    active_step:       cl.Step | None = None   # top-level phase (plan/execute/review)
+    worker_step:       cl.Step | None = None   # current tool sub-step
     worker_step_count: int = 0
-    plan_steps:       list[str] = []
-    planner_buf:      list[str] = []   # accumulates planner output for plan parsing
-    reviewer_buf:     list[str] = []   # accumulates ALL reviewer text (all iterations)
-    final_text_buf:   list[str] = []   # what gets read aloud in voice mode
+    plan_steps:        list[str] = []
+    planner_buf:       list[str] = []   # accumulates planner output for plan parsing
+    reviewer_buf:      list[str] = []   # filtered reviewer text → step display
+    reviewer_iter_raw: list[str] = []   # RAW reviewer text for current LLM call (unfiltered)
+    reviewer_final_text: str = ""       # raw text of the TASK_COMPLETE/FAILED reviewer call
+    final_text_buf:    list[str] = []   # what gets read aloud in voice mode
 
     current_node:     str | None = None
     is_conversational: bool = False
     _nodes_with_chunks: set[str] = set()
     _line_buf:        list[str] = []   # partial-line buffer for token-level filtering
-    _parent_id:       str | None = None  # response_msg.id — ties Steps to the bubble
+    # Set parent_id immediately after send() so ALL Steps nest under this bubble.
+    # Do NOT do lazy init inside the loop — response_msg.id is available right now.
+    _parent_id: str | None = response_msg.id
 
     # ─────────────────────────────────────────────────────────────────────────
     async def _close_worker_step() -> None:
@@ -388,6 +397,17 @@ async def _run_graph(input_or_command, config: dict) -> None:
             return
         raw = "".join(_line_buf)
         _line_buf.clear()
+
+        # Reviewer path: always track RAW (for verdict detection) separately
+        if dest == "reviewer_buf":
+            reviewer_iter_raw.append(raw)          # ← RAW, before any filtering
+            filtered = _filter_internal_tokens(raw)
+            if filtered.strip():
+                reviewer_buf.append(filtered)       # filtered → step display
+                if active_step:
+                    active_step.output = (active_step.output or "") + filtered
+            return
+
         filtered = _filter_internal_tokens(raw)
         if not filtered.strip():
             return
@@ -398,10 +418,6 @@ async def _run_graph(input_or_command, config: dict) -> None:
             active_step.output = (active_step.output or "") + filtered
         elif dest == "worker_step" and worker_step:
             worker_step.output = (worker_step.output or "") + filtered
-        elif dest == "reviewer_buf":
-            reviewer_buf.append(filtered)
-            if active_step:
-                active_step.output = (active_step.output or "") + filtered
         # "discard" → just drop (worker reasoning before first tool call)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -423,6 +439,9 @@ async def _run_graph(input_or_command, config: dict) -> None:
                     await _flush_line_buf_to("worker_step")
                 elif current_node == "reviewer":
                     await _flush_line_buf_to("reviewer_buf")
+                    # This transition means the reviewer said CONTINUE (graph is going to worker).
+                    # Discard this iteration — we only display the TASK_COMPLETE/FAILED one.
+                    reviewer_iter_raw.clear()
                 else:
                     _line_buf.clear()
 
@@ -443,22 +462,20 @@ async def _run_graph(input_or_command, config: dict) -> None:
                 # Close previous top-level phase step
                 await _close_active_step()
 
-                # Open new top-level phase step
-                # parent_id ties the step to response_msg so it appears
-                # nested under the assistant bubble instead of as a separate
-                # "user" entry in the chat timeline.
-                if not _parent_id and response_msg.id:
-                    _parent_id = response_msg.id
+                # Open new top-level phase step nested under response_msg
                 if node == "planner":
-                    active_step = cl.Step(name="🧠 يخطط... | Planning", type="run", parent_id=_parent_id)
+                    active_step = cl.Step(name="🧠 يخطط... | Planning", type="run",
+                                          parent_id=_parent_id)
                     await active_step.__aenter__()
                     planner_buf.clear()
                 elif node == "worker":
-                    active_step = cl.Step(name="⚡ ينفذ... | Executing", type="run", parent_id=_parent_id)
+                    active_step = cl.Step(name="⚡ ينفذ... | Executing", type="run",
+                                          parent_id=_parent_id)
                     await active_step.__aenter__()
                     worker_step_count = 0
                 elif node == "reviewer":
-                    active_step = cl.Step(name="🔍 يراجع... | Reviewing", type="run", parent_id=_parent_id)
+                    active_step = cl.Step(name="🔍 يراجع... | Reviewing", type="run",
+                                          parent_id=_parent_id)
                     await active_step.__aenter__()
 
                 current_node = node
@@ -489,7 +506,8 @@ async def _run_graph(input_or_command, config: dict) -> None:
                             label = f"🔧 {tool_name}"
                             if worker_step_count <= len(plan_steps):
                                 label = f"⚙️ الخطوة {worker_step_count}: {_clean_plan_label(plan_steps[worker_step_count - 1])}"
-                            worker_step = cl.Step(name=label, type="tool", parent_id=_parent_id)
+                            worker_step = cl.Step(name=label, type="tool",
+                                                   parent_id=_parent_id)
                             await worker_step.__aenter__()
 
                 if text:
@@ -523,9 +541,11 @@ async def _run_graph(input_or_command, config: dict) -> None:
                                 # else discard (reasoning before first tool call)
 
                             elif node == "reviewer":
-                                # Reviewer: buffer; will be shown in main bubble at end
+                                # RAW text tracked per-iteration for verdict detection
+                                reviewer_iter_raw.append(complete + "\n")
+                                # Filtered text goes to step display only
                                 reviewer_buf.append(filtered)
-                                if active_step:
+                                if filtered.strip() and active_step:
                                     active_step.output = (active_step.output or "") + filtered
                 continue
 
@@ -548,13 +568,16 @@ async def _run_graph(input_or_command, config: dict) -> None:
                     continue   # already streamed above
                 text = _extract_text_chunk(msg_chunk)
                 if text:
-                    filtered = _filter_internal_tokens(text)
-                    if filtered.strip():
-                        if node == "reviewer":
+                    if node == "reviewer":
+                        reviewer_iter_raw.append(text)   # Track RAW
+                        filtered = _filter_internal_tokens(text)
+                        if filtered.strip():
                             reviewer_buf.append(filtered)
                             if active_step:
                                 active_step.output = (active_step.output or "") + filtered
-                        elif node == "planner":
+                    elif node == "planner":
+                        filtered = _filter_internal_tokens(text)
+                        if filtered.strip():
                             planner_buf.append(filtered)
                             if is_conversational:
                                 await response_msg.stream_token(filtered)
@@ -570,27 +593,49 @@ async def _run_graph(input_or_command, config: dict) -> None:
         # ── Flush any remaining partial line ─────────────────────────────
         if _line_buf:
             raw = "".join(_line_buf)
+            _line_buf.clear()
             filtered = _filter_internal_tokens(raw)
-            if filtered.strip():
-                if current_node == "reviewer":
+            if current_node == "reviewer":
+                reviewer_iter_raw.append(raw)       # track RAW for verdict check
+                if filtered.strip():
                     reviewer_buf.append(filtered)
                     if active_step:
                         active_step.output = (active_step.output or "") + filtered
-                elif current_node == "planner" and is_conversational:
+            elif current_node == "planner" and is_conversational:
+                if filtered.strip():
                     await response_msg.stream_token(filtered)
                     final_text_buf.append(filtered)
 
-        # ── Write final reviewer answer to main bubble ────────────────────
-        # Find the last TASK_COMPLETE / FAILED block in the reviewer buffer
-        # (earlier CONTINUE iterations are discarded — they lived in the step)
-        if reviewer_buf:
-            all_rev = "".join(reviewer_buf)
-            # Locate the last verdict marker
-            tc_idx   = all_rev.rfind("TASK_COMPLETE")
-            fail_idx = all_rev.rfind("FAILED")
-            last_idx = max(tc_idx, fail_idx)
-            final_rev = all_rev[last_idx:] if last_idx >= 0 else all_rev
-            clean_rev = _filter_internal_tokens(final_rev)
+        # ── Commit the last reviewer iteration ───────────────────────────────────
+        # Graph ended while current_node == "reviewer" → this IS the final call.
+        # (CONTINUE iterations are cleared in the node-transition handler above.)
+        if reviewer_iter_raw:
+            reviewer_final_text = "".join(reviewer_iter_raw)
+            reviewer_iter_raw.clear()
+
+        # ── Write final reviewer answer to main bubble ────────────────────────
+        # DeepSeek often echoes back the input context (progress_note, system prompt
+        # examples) before writing its actual verdict. We eliminate all preamble by
+        # slicing from the LAST occurrence of "TASK_COMPLETE" or "FAILED".
+        # Using rfind ensures we skip any earlier mentions in echoed system-prompt
+        # examples and land on the real verdict line.
+        if reviewer_final_text:
+            _tc  = reviewer_final_text.rfind("TASK_COMPLETE")
+            _fl  = reviewer_final_text.rfind("FAILED")
+            _idx = max(_tc, _fl)
+            _verdict_text = reviewer_final_text[_idx:] if _idx >= 0 else reviewer_final_text
+            clean_rev = _filter_internal_tokens(_verdict_text)
+            if clean_rev.strip():
+                await response_msg.stream_token(clean_rev)
+                final_text_buf.append(clean_rev)
+        elif reviewer_buf:
+            # Fallback: no final iteration saved — apply rfind on the full buffer
+            _all = "".join(reviewer_buf)
+            _tc  = _all.rfind("TASK_COMPLETE")
+            _fl  = _all.rfind("FAILED")
+            _idx = max(_tc, _fl)
+            _verdict_text = _all[_idx:] if _idx >= 0 else _all
+            clean_rev = _filter_internal_tokens(_verdict_text)
             if clean_rev.strip():
                 await response_msg.stream_token(clean_rev)
                 final_text_buf.append(clean_rev)
