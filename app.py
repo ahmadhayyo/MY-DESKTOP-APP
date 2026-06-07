@@ -232,13 +232,58 @@ _INTERNAL_MARKERS = (
     "[PROGRESS SNAPSHOT]",
     "Plan steps:",
     "⏭️ SKIPPED:",
+    # DeepSeek DSML tags
+    "<｜｜DSML｜｜",
+    "</｜｜DSML｜｜",
+    "DSML｜｜",
+    # UNRESTRICTED MODE header (internal system prompt leak)
+    "UNRESTRICTED MODE",
+    "⚠️ وضع بلا قيود",
 )
 
 
+# ── DeepSeek DSML tag strippers ───────────────────────────────────────────────
+# DeepSeek sometimes encodes tool calls as <｜｜DSML｜｜tag>...</｜｜DSML｜｜tag>
+# We strip all of these so they never appear in the UI.
+_DSML_MARKER   = "｜｜DSML｜｜"        # ｜｜DSML｜｜  (full-width pipes)
+_DSML_OPEN     = "<"  + _DSML_MARKER                   # <｜｜DSML｜｜
+_DSML_CLOSE    = "</" + _DSML_MARKER                   # </｜｜DSML｜｜
+# Matches a complete DSML block: <｜｜DSML｜｜tag>...content...</｜｜DSML｜｜tag>
+_DSML_BLOCK_RE = re.compile(
+    re.escape(_DSML_OPEN) + r"[^>]*>.*?" + re.escape(_DSML_CLOSE) + r"[^>]*>",
+    re.DOTALL,
+)
+# Matches any standalone DSML tag (open or close)
+_DSML_TAG_RE   = re.compile(re.escape(_DSML_OPEN) + r"[^>]*/?>|" + re.escape(_DSML_CLOSE) + r"[^>]*/?>")
+# Matches a partial/truncated DSML tag at end of streaming chunk
+_DSML_FRAG_RE  = re.compile(re.escape(_DSML_OPEN) + r".*|" + re.escape(_DSML_CLOSE) + r".*")
+
+
+def _strip_dsml(text: str) -> str:
+    """Remove all DeepSeek DSML tag artefacts from streaming text.
+
+    Applies block removal in a loop to handle nested tags, then strips any
+    remaining open/close tags and partial fragments.
+    """
+    # Loop until no more DSML blocks found (handles nested blocks)
+    prev = None
+    while prev != text:
+        prev = text
+        text = _DSML_BLOCK_RE.sub('', text)
+    # Remove any leftover open/close tags
+    text = _DSML_TAG_RE.sub('', text)
+    # Remove any partial tag fragments (e.g. chunk cut-off mid-tag)
+    text = _DSML_FRAG_RE.sub('', text)
+    return text
+
+
 def _filter_internal_tokens(text: str) -> str:
-    """Strip internal control tokens from text before showing to the user."""
+    """Strip internal control tokens and DSML artefacts before showing to user."""
     if not text:
         return text
+    # 1. Strip DSML blocks first (may span multiple lines)
+    text = _strip_dsml(text)
+    # 2. Filter line-by-line for internal markers
     lines = text.split("\n")
     cleaned = []
     for line in lines:
@@ -246,7 +291,7 @@ def _filter_internal_tokens(text: str) -> str:
             continue
         cleaned.append(line)
     result = "\n".join(cleaned).strip()
-    # Collapse multiple blank lines
+    # 3. Collapse multiple blank lines
     while "\n\n\n" in result:
         result = result.replace("\n\n\n", "\n\n")
     return result
@@ -276,240 +321,274 @@ def _parse_plan_steps(text: str) -> list[str]:
 
 
 async def _run_graph(input_or_command, config: dict) -> None:
-    """Stream a single graph invocation with collapsible step-by-step display.
+    """Stream a single graph invocation with clean Claude-like display.
 
-    Display strategy (like Devin):
-      1. Planner phase → shows plan as a collapsible "📋 خطة التنفيذ" step
-      2. Worker phase  → each tool call shown as a collapsible sub-step
-      3. Reviewer phase → final summary shown, completed steps auto-collapse
+    Architecture
+    ────────────
+    • Planner   → collapsible "🧠 يخطط..." step  (NEVER in main message)
+    • Worker    → collapsible "⚙️ خطوة N" steps  (NEVER in main message)
+    • Reviewer  → ONLY the final TASK_COMPLETE/FAILED answer → main message
+    • CONVERSATIONAL_ONLY → streams directly to main message (no steps)
 
-    Deduplication strategy:
-      stream_mode="messages" emits both streaming LLM chunks (AIMessageChunk)
-      AND final state-update messages (AIMessage).  To prevent the user from
-      seeing each response twice, we track which nodes have already emitted
-      streaming chunks and skip their final AIMessage state-update.
+    This keeps the main message bubble clean: the user sees ONLY the final
+    answer, exactly like Claude's response style. Internal reasoning and
+    tool calls stay inside collapsible steps.
 
-    Token filtering strategy:
-      Internal markers (CONVERSATIONAL_ONLY, TASK_COMPLETE, etc.) can arrive as
-      individual streaming tokens ("CON", "V", "ERS"...).  We accumulate text
-      in a line buffer and only filter/emit complete lines, ensuring multi-word
-      markers are caught reliably.
+    DSML filtering
+    ──────────────
+    DeepSeek leaks <｜｜DSML｜｜...> tags into streaming chunks.
+    _strip_dsml() is applied to every chunk before routing.
     """
     global GRAPH
     if GRAPH is None:
         GRAPH = _get_graph()
 
+    # ── Main response bubble (starts empty — only filled by reviewer/conversational)
     response_msg = cl.Message(content="")
     await response_msg.send()
 
-    # ── Step tracking for collapsible display ─────────────────────────────
-    active_step: cl.Step | None = None       # current top-level phase step
-    plan_step: cl.Step | None = None         # the plan display step
-    worker_step: cl.Step | None = None       # current worker execution step
-    worker_step_count: int = 0               # counter for worker sub-steps
-    plan_steps: list[str] = []               # parsed plan from planner
-    planner_full_text: list[str] = []        # accumulate full planner output
+    # ── Step handles ─────────────────────────────────────────────────────────
+    active_step:      cl.Step | None = None   # top-level phase (plan/execute/review)
+    worker_step:      cl.Step | None = None   # current tool sub-step
+    worker_step_count: int = 0
+    plan_steps:       list[str] = []
+    planner_buf:      list[str] = []   # accumulates planner output for plan parsing
+    reviewer_buf:     list[str] = []   # accumulates ALL reviewer text (all iterations)
+    final_text_buf:   list[str] = []   # what gets read aloud in voice mode
 
-    current_node: str | None = None
-    final_text_buf: list[str] = []  # collect what becomes the spoken reply
-    is_conversational: bool = False  # track if this is a conversational response
-
-    # ── Deduplication: track nodes that already streamed LLM chunks ────────
+    current_node:     str | None = None
+    is_conversational: bool = False
     _nodes_with_chunks: set[str] = set()
+    _line_buf:        list[str] = []   # partial-line buffer for token-level filtering
 
-    # ── Line buffer for token-level filtering ─────────────────────────────
-    _line_buf: list[str] = []
-
+    # ─────────────────────────────────────────────────────────────────────────
     async def _close_worker_step() -> None:
-        """Close the current worker sub-step if open."""
         nonlocal worker_step
         if worker_step:
             await worker_step.__aexit__(None, None, None)
             worker_step = None
 
     async def _close_active_step() -> None:
-        """Close the current top-level phase step if open."""
         nonlocal active_step
         if active_step:
             await active_step.__aexit__(None, None, None)
             active_step = None
 
-    async def _flush_line_buf(for_node: str | None) -> None:
-        """Filter accumulated text and stream clean content to the user."""
+    def _clean_plan_label(raw: str) -> str:
+        """Remove leading number and tool-call parentheses for clean step labels."""
+        s = re.sub(r'^\d+[\.\)]\s*', '', raw).strip()
+        s = re.sub(r'\(.*?\)', '', s).strip()   # remove (url='...') etc.
+        s = re.sub(r'\→.*$', '', s).strip()     # remove → description
+        return s or raw
+
+    async def _flush_line_buf_to(dest: str) -> None:
+        """Flush accumulated partial-line buffer to the given destination."""
         if not _line_buf:
             return
-        accumulated = "".join(_line_buf)
+        raw = "".join(_line_buf)
         _line_buf.clear()
-        if not accumulated:
+        filtered = _filter_internal_tokens(raw)
+        if not filtered.strip():
             return
-        filtered = _filter_internal_tokens(accumulated)
-        if filtered:
-            # During planner phase, accumulate for plan parsing
-            if for_node == "planner":
-                planner_full_text.append(filtered)
-                # Check for conversational response
-                if "CONVERSATIONAL_ONLY" in accumulated:
-                    return
-            # Stream to the response message
+        if dest == "main":
             await response_msg.stream_token(filtered)
-            if for_node in ("planner", "reviewer"):
-                final_text_buf.append(filtered)
+            final_text_buf.append(filtered)
+        elif dest == "active_step" and active_step:
+            active_step.output = (active_step.output or "") + filtered
+        elif dest == "worker_step" and worker_step:
+            worker_step.output = (worker_step.output or "") + filtered
+        elif dest == "reviewer_buf":
+            reviewer_buf.append(filtered)
+            if active_step:
+                active_step.output = (active_step.output or "") + filtered
+        # "discard" → just drop (worker reasoning before first tool call)
 
+    # ─────────────────────────────────────────────────────────────────────────
     try:
         async for msg_chunk, metadata in GRAPH.astream(
             input_or_command, config=config, stream_mode="messages"
         ):
             node = metadata.get("langgraph_node", "")
 
-            # ── Node transition handling ──────────────────────────────────
+            # ── Node transition ───────────────────────────────────────────
             if node and node != current_node:
-                await _flush_line_buf(current_node)
+                # Flush whatever was left in the line buffer for the OLD node
+                if current_node == "planner":
+                    if is_conversational:
+                        await _flush_line_buf_to("main")
+                    else:
+                        await _flush_line_buf_to("active_step")
+                elif current_node == "worker":
+                    await _flush_line_buf_to("worker_step")
+                elif current_node == "reviewer":
+                    await _flush_line_buf_to("reviewer_buf")
+                else:
+                    _line_buf.clear()
 
-                # ── Leaving planner → show plan as collapsible step ───────
+                # Leaving planner → build collapsible plan step
                 if current_node == "planner" and not is_conversational:
-                    full_plan_text = "".join(planner_full_text)
-                    plan_steps = _parse_plan_steps(full_plan_text)
-                    if plan_steps:
-                        # Close the thinking step
-                        await _close_active_step()
-                        # Create a collapsible plan summary
-                        plan_content = "**📋 خطة التنفيذ:**\n"
-                        for i, step in enumerate(plan_steps, 1):
-                            # Remove the leading number if present
-                            clean = re.sub(r'^\d+[\.\)]\s*', '', step)
-                            plan_content += f"\n{i}. {clean}"
-                        plan_step = cl.Step(
-                            name="📋 خطة التنفيذ | Execution Plan",
-                            type="tool",
-                        )
-                        await plan_step.__aenter__()
-                        plan_step.output = plan_content
-                        await plan_step.__aexit__(None, None, None)
-                        plan_step = None
+                    full = "".join(planner_buf)
+                    plan_steps = _parse_plan_steps(full)
+                    if active_step and plan_steps:
+                        plan_content = "**📋 الخطوات المخططة:**"
+                        for i, s in enumerate(plan_steps, 1):
+                            plan_content += f"\n{i}. {_clean_plan_label(s)}"
+                        active_step.output = plan_content
 
-                # ── Leaving worker → close worker sub-step ────────────────
+                # Leaving worker → close its sub-step
                 if current_node == "worker":
                     await _close_worker_step()
 
-                # ── Close previous phase step ─────────────────────────────
+                # Close previous top-level phase step
                 await _close_active_step()
 
-                # ── Open new phase step ───────────────────────────────────
+                # Open new top-level phase step
                 if node == "planner":
-                    active_step = cl.Step(
-                        name="🧠 يفكر... | Thinking...",
-                        type="run",
-                    )
+                    active_step = cl.Step(name="🧠 يخطط... | Planning", type="run")
                     await active_step.__aenter__()
-                    planner_full_text.clear()
+                    planner_buf.clear()
                 elif node == "worker":
-                    active_step = cl.Step(
-                        name="⚡ ينفذ... | Executing...",
-                        type="run",
-                    )
+                    active_step = cl.Step(name="⚡ ينفذ... | Executing", type="run")
                     await active_step.__aenter__()
                     worker_step_count = 0
                 elif node == "reviewer":
-                    active_step = cl.Step(
-                        name="🔍 يراجع... | Reviewing...",
-                        type="run",
-                    )
+                    active_step = cl.Step(name="🔍 يراجع... | Reviewing", type="run")
                     await active_step.__aenter__()
 
                 current_node = node
 
-            # Skip SystemMessage chunks — they are internal context only
-            if isinstance(msg_chunk, _SysMsg):
+            # Skip internal message types
+            if isinstance(msg_chunk, (_SysMsg, HumanMessage)):
                 continue
 
-            # Skip HumanMessage re-emissions from state updates
-            if isinstance(msg_chunk, HumanMessage):
-                continue
-
-            # ── Streaming LLM chunks (AIMessageChunk) ─────────────────────
+            # ── Streaming LLM chunk (AIMessageChunk) ─────────────────────
             if isinstance(msg_chunk, AIMessageChunk):
                 _nodes_with_chunks.add(node)
                 text = _extract_text_chunk(msg_chunk)
 
-                # ── Detect tool calls in streaming chunks → show as sub-step
-                if node == "worker" and hasattr(msg_chunk, 'tool_call_chunks'):
-                    for tc_chunk in (msg_chunk.tool_call_chunks or []):
-                        tool_name = tc_chunk.get("name", "")
+                # Detect tool call → open a worker sub-step
+                if node == "worker" and hasattr(msg_chunk, "tool_call_chunks"):
+                    for tc in (msg_chunk.tool_call_chunks or []):
+                        tool_name = tc.get("name", "")
                         if tool_name:
+                            # Flush any worker reasoning into the current step
+                            if _line_buf:
+                                raw = "".join(_line_buf)
+                                _line_buf.clear()
+                                filtered = _filter_internal_tokens(raw)
+                                if filtered.strip() and worker_step:
+                                    worker_step.output = (worker_step.output or "") + filtered
                             await _close_worker_step()
                             worker_step_count += 1
-                            step_label = f"🔧 {tool_name}"
-                            # Match to plan step if possible
+                            label = f"🔧 {tool_name}"
                             if worker_step_count <= len(plan_steps):
-                                plan_text = plan_steps[worker_step_count - 1]
-                                clean_plan = re.sub(r'^\d+[\.\)]\s*', '', plan_text)
-                                step_label = f"⚙️ خطوة {worker_step_count}: {clean_plan}"
-                            worker_step = cl.Step(
-                                name=step_label,
-                                type="tool",
-                            )
+                                label = f"⚙️ الخطوة {worker_step_count}: {_clean_plan_label(plan_steps[worker_step_count - 1])}"
+                            worker_step = cl.Step(name=label, type="tool")
                             await worker_step.__aenter__()
 
                 if text:
                     _line_buf.append(text)
-                    # Flush complete lines through the filter immediately
                     accumulated = "".join(_line_buf)
+                    # Process complete lines only (token-level safety)
                     if "\n" in accumulated:
                         complete, remainder = accumulated.rsplit("\n", 1)
                         _line_buf.clear()
                         if remainder:
                             _line_buf.append(remainder)
                         filtered = _filter_internal_tokens(complete + "\n")
-                        if filtered:
-                            if current_node == "planner":
-                                planner_full_text.append(filtered)
-                                # Check for conversational marker
+                        if filtered.strip():
+                            if node == "planner":
+                                planner_buf.append(filtered)
                                 if "CONVERSATIONAL_ONLY" in complete:
                                     is_conversational = True
-                            # Stream worker tool output into the sub-step
-                            if current_node == "worker" and worker_step:
-                                worker_step.output = (worker_step.output or "") + filtered
-                            await response_msg.stream_token(filtered)
-                            if node in ("planner", "reviewer"):
-                                final_text_buf.append(filtered)
+                                if is_conversational:
+                                    # Conversational: goes straight to main bubble
+                                    await response_msg.stream_token(filtered)
+                                    final_text_buf.append(filtered)
+                                else:
+                                    # Task plan: step output only
+                                    if active_step:
+                                        active_step.output = (active_step.output or "") + filtered
+
+                            elif node == "worker":
+                                # Worker reasoning/output: step only, never main bubble
+                                if worker_step:
+                                    worker_step.output = (worker_step.output or "") + filtered
+                                # else discard (reasoning before first tool call)
+
+                            elif node == "reviewer":
+                                # Reviewer: buffer; will be shown in main bubble at end
+                                reviewer_buf.append(filtered)
+                                if active_step:
+                                    active_step.output = (active_step.output or "") + filtered
                 continue
 
-            # ── ToolMessage results → show inside worker sub-step ─────────
+            # ── ToolMessage → show result inside current worker sub-step ──
             if isinstance(msg_chunk, ToolMessage):
-                tool_result = msg_chunk.content if isinstance(msg_chunk.content, str) else str(msg_chunk.content)
-                if worker_step and tool_result:
-                    truncated = tool_result[:500]
-                    if len(tool_result) > 500:
-                        truncated += "... (مقتطع)"
-                    worker_step.output = (worker_step.output or "") + f"\n```\n{truncated}\n```"
-                    # Close this tool step as completed
+                result = (
+                    msg_chunk.content
+                    if isinstance(msg_chunk.content, str)
+                    else str(msg_chunk.content)
+                )
+                if worker_step and result:
+                    trunc = result[:600] + ("…(مقتطع)" if len(result) > 600 else "")
+                    worker_step.output = (worker_step.output or "") + f"\n```\n{trunc}\n```"
                     await _close_worker_step()
                 continue
 
-            # ── Full AIMessage from state update ──────────────────────────
-            #  Skip if this node already streamed chunks (would be a duplicate).
-            #  Only show messages from nodes that did NOT call the LLM
-            #  (e.g., error messages created directly by the node).
+            # ── Full AIMessage (state-update, not a streaming chunk) ───────
             if isinstance(msg_chunk, AIMessage):
                 if node in _nodes_with_chunks:
-                    continue
+                    continue   # already streamed above
                 text = _extract_text_chunk(msg_chunk)
                 if text:
                     filtered = _filter_internal_tokens(text)
-                    if filtered:
-                        if current_node == "planner":
-                            planner_full_text.append(filtered)
-                        await response_msg.stream_token(filtered)
-                        if node in ("planner", "reviewer"):
-                            final_text_buf.append(filtered)
+                    if filtered.strip():
+                        if node == "reviewer":
+                            reviewer_buf.append(filtered)
+                            if active_step:
+                                active_step.output = (active_step.output or "") + filtered
+                        elif node == "planner":
+                            planner_buf.append(filtered)
+                            if is_conversational:
+                                await response_msg.stream_token(filtered)
+                                final_text_buf.append(filtered)
                 continue
 
     except Exception as exc:
         await cl.Message(
             content=f"❌ **خطأ في التنفيذ**: {type(exc).__name__}: {exc}"
         ).send()
+
     finally:
-        await _flush_line_buf(current_node)
+        # ── Flush any remaining partial line ─────────────────────────────
+        if _line_buf:
+            raw = "".join(_line_buf)
+            filtered = _filter_internal_tokens(raw)
+            if filtered.strip():
+                if current_node == "reviewer":
+                    reviewer_buf.append(filtered)
+                    if active_step:
+                        active_step.output = (active_step.output or "") + filtered
+                elif current_node == "planner" and is_conversational:
+                    await response_msg.stream_token(filtered)
+                    final_text_buf.append(filtered)
+
+        # ── Write final reviewer answer to main bubble ────────────────────
+        # Find the last TASK_COMPLETE / FAILED block in the reviewer buffer
+        # (earlier CONTINUE iterations are discarded — they lived in the step)
+        if reviewer_buf:
+            all_rev = "".join(reviewer_buf)
+            # Locate the last verdict marker
+            tc_idx   = all_rev.rfind("TASK_COMPLETE")
+            fail_idx = all_rev.rfind("FAILED")
+            last_idx = max(tc_idx, fail_idx)
+            final_rev = all_rev[last_idx:] if last_idx >= 0 else all_rev
+            clean_rev = _filter_internal_tokens(final_rev)
+            if clean_rev.strip():
+                await response_msg.stream_token(clean_rev)
+                final_text_buf.append(clean_rev)
+
         await _close_worker_step()
         await _close_active_step()
         await response_msg.update()
