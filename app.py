@@ -360,6 +360,7 @@ async def _run_graph(input_or_command, config: dict) -> None:
     is_conversational: bool = False
     _nodes_with_chunks: set[str] = set()
     _line_buf:        list[str] = []   # partial-line buffer for token-level filtering
+    _parent_id:       str | None = None  # response_msg.id — ties Steps to the bubble
 
     # ─────────────────────────────────────────────────────────────────────────
     async def _close_worker_step() -> None:
@@ -443,16 +444,21 @@ async def _run_graph(input_or_command, config: dict) -> None:
                 await _close_active_step()
 
                 # Open new top-level phase step
+                # parent_id ties the step to response_msg so it appears
+                # nested under the assistant bubble instead of as a separate
+                # "user" entry in the chat timeline.
+                if not _parent_id and response_msg.id:
+                    _parent_id = response_msg.id
                 if node == "planner":
-                    active_step = cl.Step(name="🧠 يخطط... | Planning", type="run")
+                    active_step = cl.Step(name="🧠 يخطط... | Planning", type="run", parent_id=_parent_id)
                     await active_step.__aenter__()
                     planner_buf.clear()
                 elif node == "worker":
-                    active_step = cl.Step(name="⚡ ينفذ... | Executing", type="run")
+                    active_step = cl.Step(name="⚡ ينفذ... | Executing", type="run", parent_id=_parent_id)
                     await active_step.__aenter__()
                     worker_step_count = 0
                 elif node == "reviewer":
-                    active_step = cl.Step(name="🔍 يراجع... | Reviewing", type="run")
+                    active_step = cl.Step(name="🔍 يراجع... | Reviewing", type="run", parent_id=_parent_id)
                     await active_step.__aenter__()
 
                 current_node = node
@@ -483,7 +489,7 @@ async def _run_graph(input_or_command, config: dict) -> None:
                             label = f"🔧 {tool_name}"
                             if worker_step_count <= len(plan_steps):
                                 label = f"⚙️ الخطوة {worker_step_count}: {_clean_plan_label(plan_steps[worker_step_count - 1])}"
-                            worker_step = cl.Step(name=label, type="tool")
+                            worker_step = cl.Step(name=label, type="tool", parent_id=_parent_id)
                             await worker_step.__aenter__()
 
                 if text:
