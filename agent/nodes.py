@@ -1488,8 +1488,61 @@ def worker_node(state: AgentState) -> dict:
 
             tool_fn = TOOL_MAP.get(tool_name)
             if not tool_fn:
-                result = f"❌ ERROR: Tool '{tool_name}' is not registered. Available tools: {list(TOOL_MAP.keys())}"
-            else:
+                # The model invented / mistyped a tool name (e.g. 'browser_react'
+                # instead of 'browser_react_fill'). Instead of dumping all 200+
+                # tool names (huge, unhelpful, causes loops), find the closest real
+                # tool. If it's an obvious match, AUTO-CORRECT and run it; otherwise
+                # return a short list of the nearest candidates.
+                import difflib
+                _all_names = list(TOOL_MAP.keys())
+                _close = difflib.get_close_matches(tool_name, _all_names, n=5, cutoff=0.6)
+                # also catch prefix/substring matches the ratio may miss
+                _sub = [n for n in _all_names
+                        if tool_name and (n.startswith(tool_name) or tool_name in n)]
+                _candidates = list(dict.fromkeys(_close + _sub))
+
+                _auto = None
+                if _candidates:
+                    top = _candidates[0]
+                    ratio = difflib.SequenceMatcher(None, tool_name, top).ratio()
+                    # Auto-correct when very close OR the invented name is a clean
+                    # prefix of exactly one real tool (browser_react → browser_react_fill).
+                    prefix_hits = [n for n in _all_names if n.startswith(tool_name)]
+                    if ratio >= 0.82 or len(prefix_hits) == 1:
+                        _auto = prefix_hits[0] if len(prefix_hits) == 1 else top
+
+                if _auto and TOOL_MAP.get(_auto):
+                    logger.info("[Worker] Auto-corrected tool '%s' → '%s'", tool_name, _auto)
+                    _corrected_fn = TOOL_MAP[_auto]
+                    try:
+                        from core.resilience import run_tool_resiliently
+                        raw_result = run_tool_resiliently(_corrected_fn, tool_args, _auto)
+                    except Exception as exc:
+                        raw_result = f"❌ ERROR running {_auto}: {type(exc).__name__}: {exc}"
+                    result = (f"ℹ️ [تصحيح تلقائي] الأداة '{tool_name}' غير موجودة — "
+                              f"استخدمتُ '{_auto}' بدلاً منها.\n{raw_result}")
+                    new_messages.append(ToolMessage(content=str(result), tool_call_id=tool_id))
+                    tool_call_history = record_tool_call(
+                        tool_name=_auto, tool_args=tool_args, result=str(result),
+                        tool_history=tool_call_history, max_history=20,
+                    )
+                    last_tool_name, last_tool_args = _auto, tool_args
+                    continue
+
+                _hint = (f"أقرب الأدوات: {', '.join(_candidates[:5])}"
+                         if _candidates else
+                         "استخدم أداة من القائمة المتاحة فقط ولا تخترع أسماء.")
+                result = (f"❌ الأداة '{tool_name}' غير مسجّلة ولا تُخمّن اسماً. {_hint}\n"
+                          f"اختر الاسم الصحيح بالضبط من الأدوات المتاحة، ولا تُعد نفس الاسم الخاطئ.")
+                error_logs.append(f"[iter {iteration+1}] unknown tool '{tool_name}'")
+                new_messages.append(ToolMessage(content=result, tool_call_id=tool_id))
+                # record the bad attempt so the loop guard can catch repetition
+                tool_call_history = record_tool_call(
+                    tool_name=f"UNKNOWN:{tool_name}", tool_args=tool_args, result=result,
+                    tool_history=tool_call_history, max_history=20,
+                )
+                continue
+            if True:
                 # Self-healing execution: transient failures (network blips, locked
                 # files, timeouts, rate limits) auto-retry with backoff; permanent
                 # failures come back with an actionable diagnostic instead of a raw

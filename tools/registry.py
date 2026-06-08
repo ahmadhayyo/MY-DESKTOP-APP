@@ -464,6 +464,20 @@ def _load_telegram():
 _import_category("telegram", _load_telegram)
 
 
+# ═══════════════════════════════════════════════════════════
+# MARKETS — live data, technical analysis & charts (TwelveData)
+# ═══════════════════════════════════════════════════════════
+def _load_market():
+    from tools.market_tools import (
+        market_quote, market_timeseries, market_indicator,
+        market_analyze, market_chart, market_news,
+    )
+    return [market_quote, market_timeseries, market_indicator,
+            market_analyze, market_chart, market_news]
+
+_import_category("market", _load_market)
+
+
 # ── Final exports ─────────────────────────────────────────────────────────────
 ALL_TOOLS: list[BaseTool] = _all_tools
 TOOLS_BY_NAME: dict[str, BaseTool] = {t.name: t for t in ALL_TOOLS}

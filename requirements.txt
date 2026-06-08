@@ -73,3 +73,6 @@ python-pptx>=1.0.0
 
 # Telegram (user account via MTProto — search groups & download files)
 telethon>=1.36.0
+
+# Market data & charts (TwelveData feed + candlestick charts)
+matplotlib>=3.7.0
