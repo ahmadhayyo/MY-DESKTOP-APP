@@ -810,10 +810,17 @@ TOOL SELECTION RULES (choose the right tool from the start):
 • Solve text CAPTCHA on screen     → solve_text_captcha(region='x,y,w,h')
 • Type Arabic/Unicode safely       → type_text_clipboard(text='...')
 • Office work (Word/Excel/PowerPoint) → build the file directly with library tools
-  (no need to open the app). Typical multi-step plans:
-    Excel report: excel_create(data) → excel_set_formula / excel_add_total_row →
+  (no need to open the app).
+  ❗ NEVER build Arabic Excel/CSV via run_powershell or write_file — PowerShell's
+    code page mangles Arabic into "ط§ظ„ظ‚ط³ظ…" and crams everything into one column.
+    ALWAYS use excel_create / word_add_table with JSON: a list of ROWS, each row a
+    list of CELLS, e.g. [["القسم","العنوان","المحتوى"],["مقدمة","الهدف","..."]].
+    One inner list = one row; one element = one cell (do NOT put a whole CSV line
+    in a single cell).
+  Typical multi-step plans:
+    Excel report: excel_create(data=JSON rows) → excel_set_formula / excel_add_total_row →
                   excel_add_chart → excel_style_report (one-call professional styling)
-    Word report:  word_add_heading → word_add_paragraph → word_add_table →
+    Word report:  word_add_heading → word_add_paragraph → word_add_table(data=JSON rows) →
                   word_add_list → word_set_rtl (for Arabic)
     PowerPoint:   ppt_create(title) → ppt_add_bullets / ppt_add_table / ppt_add_chart
                   (one slide per call) → ppt_set_theme(color, font)

@@ -70,6 +70,8 @@ def word_add_heading(path: str, text: str, level: int = 1) -> str:
     if err:
         return err
     try:
+        from core.text_repair import fix_mojibake
+        text = fix_mojibake(text)
         doc.add_heading(text, level=max(0, min(level, 4)))
         doc.save(str(p))
         return f"✅ أُضيف عنوان (مستوى {level}): «{text}»"
@@ -106,6 +108,8 @@ def word_add_paragraph(
     try:
         from docx.shared import Pt
         from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from core.text_repair import fix_mojibake
+        text = fix_mojibake(text)
         para = doc.add_paragraph()
         run = para.add_run(text)
         run.bold = bold
@@ -152,14 +156,17 @@ def word_add_table(
     if err:
         return err
     try:
-        rows_data = json.loads(data) if isinstance(data, str) else data
-        if not rows_data:
+        rows_data = data
+        if isinstance(data, str):
+            try:
+                rows_data = json.loads(data)
+            except json.JSONDecodeError:
+                rows_data = data  # raw CSV/TSV → normalize_table handles it
+        # Clean grid + repair garbled Arabic (mojibake), split CSV-in-one-cell, etc.
+        from core.text_repair import normalize_table
+        table_rows = normalize_table(rows_data)
+        if not table_rows:
             return "❌ لا توجد بيانات للجدول."
-        if isinstance(rows_data[0], dict):
-            headers = list(rows_data[0].keys())
-            table_rows = [headers] + [[r.get(h, "") for h in headers] for r in rows_data]
-        else:
-            table_rows = [list(r) for r in rows_data]
 
         n_cols = len(table_rows[0])
         table = doc.add_table(rows=0, cols=n_cols)

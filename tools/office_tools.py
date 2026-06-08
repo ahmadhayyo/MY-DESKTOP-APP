@@ -34,30 +34,49 @@ def excel_create(path: str, data: str, sheet_name: str = "Sheet1") -> str:
     except ImportError:
         return "Error: openpyxl not installed. Run: pip install openpyxl"
 
-    try:
-        rows = json.loads(data) if isinstance(data, str) else data
-    except json.JSONDecodeError:
-        return f"Error: invalid JSON data"
+    # Parse JSON if given a string, but keep a raw string fallback (the data may be
+    # a plain CSV/TSV block, not JSON).
+    rows = data
+    if isinstance(data, str):
+        try:
+            rows = json.loads(data)
+        except json.JSONDecodeError:
+            rows = data  # treat as a raw CSV/TSV document → normalize_table splits it
+
+    # Normalize into a clean 2-D grid AND repair any garbled Arabic (mojibake).
+    # This fixes two real failures: (a) CSV strings dumped into a single column,
+    # (b) Arabic written through a wrong code page showing up as "ط§ظ„ظ‚ط³ظ…".
+    from core.text_repair import normalize_table
+    grid = normalize_table(rows)
+    if not grid:
+        return "Error: data must be list of lists, list of dicts, or CSV text"
 
     wb = Workbook()
     ws = wb.active
     ws.title = sheet_name
+    for row in grid:
+        ws.append(list(row))
 
-    if rows and isinstance(rows[0], dict):
-        headers = list(rows[0].keys())
-        ws.append(headers)
-        for row in rows:
-            ws.append([row.get(h, "") for h in headers])
-    elif rows and isinstance(rows[0], (list, tuple)):
-        for row in rows:
-            ws.append(list(row))
-    else:
-        return "Error: data must be list of lists or list of dicts"
+    # Light professional touch: bold header + autofit so the result is readable.
+    try:
+        from openpyxl.styles import Font
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+        widths: dict = {}
+        for r in ws.iter_rows():
+            for c in r:
+                if c.value is not None:
+                    widths[c.column_letter] = max(widths.get(c.column_letter, 0), len(str(c.value)))
+        for col, w in widths.items():
+            ws.column_dimensions[col].width = min(max(w + 2, 10), 60)
+        ws.freeze_panes = "A2"
+    except Exception:
+        pass
 
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     wb.save(str(p))
-    return f"Excel file created: {p} ({len(rows)} rows)"
+    return f"✅ Excel file created: {p} ({len(grid)} rows × {len(grid[0]) if grid else 0} cols)"
 
 
 @tool
@@ -242,6 +261,11 @@ def word_create(path: str, content: str, title: str = "") -> str:
         from docx.shared import Pt
     except ImportError:
         return "Error: python-docx not installed. Run: pip install python-docx"
+
+    # Repair any garbled Arabic (mojibake) before writing.
+    from core.text_repair import fix_mojibake
+    content = fix_mojibake(content)
+    title = fix_mojibake(title)
 
     doc = Document()
 
