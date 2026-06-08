@@ -161,7 +161,24 @@ def _forge():
     return "agent forged + ran + removed a tool live"
 
 
-# ── 12. Web search (network — WARN if offline) ────────────────────────────────
+# ── 12. App builder readiness (no slow build) ─────────────────────────────────
+def _appbuilder():
+    from tools.app_builder_tools import _venv_pyinstaller, lint_python
+    import tempfile
+    assert _venv_pyinstaller(), "PyInstaller not found (pip install pyinstaller)"
+    import importlib
+    importlib.import_module("tkinter")
+    # lint a tiny valid snippet
+    p = os.path.join(tempfile.gettempdir(), "_hc_app.py")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("import tkinter as tk\nroot = tk.Tk()\nroot.mainloop()\n")
+    r = lint_python.invoke({"path": p})
+    os.remove(p)
+    assert r.startswith("✅"), f"lint failed: {r}"
+    return "PyInstaller + tkinter + lint ready (full build ~30-60s)"
+
+
+# ── 13. Web search (network — WARN if offline) ────────────────────────────────
 def _websearch():
     from tools.web_search_tools import _ddg_text
     r = _ddg_text("python programming", 2)
@@ -184,7 +201,8 @@ def main():
     check("9. Scheduler parsing", _scheduler)
     check("10. Memory-DB pruning", _maintenance)
     check("11. Capability Forge (self-extend)", _forge)
-    check("12. Web search (network)", _websearch, network=True)
+    check("12. Desktop app builder (EXE)", _appbuilder)
+    check("13. Web search (network)", _websearch, network=True)
 
     print()
     npass = sum(1 for s, _, _ in results if s == PASS)

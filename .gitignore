@@ -49,5 +49,9 @@ test_voice.mp3
 # Build artifacts (PyInstaller etc.) — not source
 build/
 dist/
+_build/
+_dist/
+_spec/
+*_project/
 *.spec
 *.exe

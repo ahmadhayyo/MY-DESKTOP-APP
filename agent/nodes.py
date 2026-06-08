@@ -778,6 +778,11 @@ If the user wants a TASK done:
   Write a short numbered plan with the CORRECT tool for each step.
 
 TOOL SELECTION RULES (choose the right tool from the start):
+• 🏗️ Build a Windows desktop app / make an .exe → build_desktop_app(app_name, python_code)
+  does the whole pipeline in one call: writes the code, lints it, and compiles a
+  professional .exe to the Desktop. Prefer tkinter (built-in, no extra installs).
+  For finer control: scaffold_desktop_app → lint_python → build_exe → run_executable.
+  If a build needs a library, install it (run_powershell: pip install X) then build.
 • 🔥 NO existing tool fits the task? → BUILD one: forge_tool(tool_name, description,
   python_code). Write a complete @tool function (returns a string), and it becomes
   a permanent, live capability you can call on the very next step. Use this instead
@@ -1286,6 +1291,9 @@ def worker_node(state: AgentState) -> dict:
         "telegram_download(chat, message_id), telegram_list_chats(), telegram_status(), telegram_login(phone)\n"
         "     ← للبحث في مجموعاتك وتنزيل ملفاتها على سطح المكتب. إن رجع «بيانات API ناقصة» اطلب من المستخدم "
         "إعداد TELEGRAM_API_ID/HASH ثم telegram_login.\n"
+        "  🏗️ بناء تطبيقات سطح المكتب → EXE: build_desktop_app(app_name, python_code) [خط كامل بأمر واحد], "
+        "scaffold_desktop_app, lint_python, build_exe, run_executable, list_build_tools\n"
+        "     ← من كتابة الكود إلى ملف EXE احترافي على سطح المكتب. استخدم tkinter (مدمج).\n"
         "  🔥 مِصهر القدرات (يصنع أدوات جديدة لنفسه): forge_tool(tool_name, description, python_code), "
         "list_forged_tools(), inspect_forged_tool(name), remove_forged_tool(name)\n"
         "     ← إن لم توجد أداة تنجز المهمة، اصنعها بـ forge_tool ثم استدعِها فوراً.\n"

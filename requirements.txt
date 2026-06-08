@@ -76,3 +76,7 @@ telethon>=1.36.0
 
 # Market data & charts (TwelveData feed + candlestick charts)
 matplotlib>=3.7.0
+
+# Desktop app building (write code → compile a Windows .exe)
+pyinstaller>=6.0.0
+pyflakes>=3.0.0

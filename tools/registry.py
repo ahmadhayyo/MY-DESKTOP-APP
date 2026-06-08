@@ -479,6 +479,20 @@ _import_category("market", _load_market)
 
 
 # ═══════════════════════════════════════════════════════════
+# APP BUILDER — write code → lint → compile a Windows .exe (PyInstaller)
+# ═══════════════════════════════════════════════════════════
+def _load_app_builder():
+    from tools.app_builder_tools import (
+        list_build_tools, scaffold_desktop_app, lint_python,
+        build_exe, build_desktop_app, run_executable,
+    )
+    return [list_build_tools, scaffold_desktop_app, lint_python,
+            build_exe, build_desktop_app, run_executable]
+
+_import_category("app_builder", _load_app_builder)
+
+
+# ═══════════════════════════════════════════════════════════
 # CAPABILITY FORGE — the agent writes & registers its own new tools at runtime
 # ═══════════════════════════════════════════════════════════
 def _load_forge():
