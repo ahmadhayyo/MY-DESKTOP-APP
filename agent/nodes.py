@@ -775,6 +775,17 @@ TOOL SELECTION RULES (choose the right tool from the start):
                                      Example plan for "نتيجة مباراة مصر والبرازيل أمس":
                                        1. web_answer(query='Egypt Brazil match result')
                                        (one step — read the snippets and answer directly)
+• Research a topic + read studies/docs + apply on the PC (the full workflow):
+    1. web_search(query=...)                 → get the best source URLs
+    2. read_webpage(url=...)                 → ONE call per page: opens + reads +
+                                               extracts the main article AND code blocks.
+       ❗ Do NOT browser_open then browser_get_text separately, and NEVER call the
+         same read on one URL more than once — read each page ONCE, then move on.
+       (PDF link? browser_download_to_desktop(url) → pdf_read(path).)
+    3. Apply the solution on the machine    → write_file / create_project /
+                                               edit_file_lines / run_python / run_script,
+                                               then run it and report the result.
+  Read at most 2–3 pages, then act on what you learned — don't keep re-reading.
 • Remember/recall user info        → remember_fact / recall_facts. At the start of a task,
                                      recall_facts(query=...) to reuse known preferences/paths
                                      instead of asking again. Save new durable info with remember_fact.
@@ -1218,6 +1229,9 @@ def worker_node(state: AgentState) -> dict:
         "     browser_screenshot, browser_scroll_page, browser_select_option, browser_upload_file,\n"
         "     browser_get_links, browser_download_to_desktop, browser_download_via_click, browser_get_page_info\n"
         "     ⚠️ المتصفح لفتح مواقع محددة فقط — للبحث استخدم web_search (Google يحظر المتصفح بـ CAPTCHA).\n"
+        "  📖 قراءة الدراسات/المقالات/الوثائق: read_webpage(url=...) ← يفتح ويقرأ ويستخرج المحتوى الرئيسي "
+        "والأكواد دفعة واحدة. اقرأ كل رابط مرة واحدة فقط ثم انتقل. إن رجع [EMPTY] لا تُعد نفس الاستدعاء — "
+        "استخدم browser_screenshot() أو رابطاً بديلاً.\n"
         "  💻 الأوامر: run_powershell, run_cmd, get_env  ← للنظام فقط، ليس للإنترنت\n"
         "  🔧 النظام: get_system_info, list_processes, kill_process, manage_service\n"
         "  📋 الحافظة: clipboard_get, clipboard_set\n"

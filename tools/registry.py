@@ -94,9 +94,10 @@ def _load_browser():
         browser_new_tab, browser_open, browser_press, browser_react_fill,
         browser_screenshot, browser_scroll_page, browser_select_option,
         browser_switch_tab, browser_upload_file, browser_wait_for,
+        read_webpage,
     )
     return [
-        browser_open, browser_get_text, browser_click, browser_fill,
+        browser_open, read_webpage, browser_get_text, browser_click, browser_fill,
         browser_react_fill, browser_press, browser_screenshot,
         browser_download_via_click, browser_download_to_desktop,
         browser_eval_js, browser_wait_for, browser_login,
