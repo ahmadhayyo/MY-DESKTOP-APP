@@ -448,6 +448,22 @@ def _load_scheduler():
 _import_category("scheduler", _load_scheduler)
 
 
+# ═══════════════════════════════════════════════════════════
+# TELEGRAM (Telethon) — search groups/chats and download files
+# ═══════════════════════════════════════════════════════════
+def _load_telegram():
+    from tools.telegram_tools import (
+        telegram_status, telegram_login, telegram_verify_code,
+        telegram_list_chats, telegram_search, telegram_search_files,
+        telegram_download,
+    )
+    return [telegram_status, telegram_login, telegram_verify_code,
+            telegram_list_chats, telegram_search, telegram_search_files,
+            telegram_download]
+
+_import_category("telegram", _load_telegram)
+
+
 # ── Final exports ─────────────────────────────────────────────────────────────
 ALL_TOOLS: list[BaseTool] = _all_tools
 TOOLS_BY_NAME: dict[str, BaseTool] = {t.name: t for t in ALL_TOOLS}

@@ -21,6 +21,10 @@ integrations.json
 last_session.json
 agent_facts.json
 scheduled_jobs.json
+# Telegram (Telethon) session = login credentials, NEVER commit
+telegram_user.session
+*.session
+*.session-journal
 .browser_profile/
 .files/
 logs/

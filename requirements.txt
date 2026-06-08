@@ -67,3 +67,9 @@ edge-tts>=7.0.0
 groq>=0.9.0
 openai>=1.40.0
 ddgs>=9.0.0
+
+# PowerPoint authoring
+python-pptx>=1.0.0
+
+# Telegram (user account via MTProto — search groups & download files)
+telethon>=1.36.0
