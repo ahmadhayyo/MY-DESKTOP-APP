@@ -63,11 +63,12 @@ def _parse_when(when: str) -> dict:
             secs = n * 60
         return {"kind": "interval", "interval_seconds": max(60, secs)}
 
-    # ── relative once ── "in 30 minutes", "after 2 hours", "بعد 15 دقيقة"
-    rel = re.search(r"(?:in|after|بعد)\s*(\d+)\s*"
+    # ── relative once ── "in 30 minutes", "after 2 hours", "بعد 15 دقيقة",
+    #    and number-less forms "بعد ساعة" / "after an hour" (default count = 1).
+    rel = re.search(r"(?:in|after|بعد)\s*(\d+)?\s*(?:an?\s+)?"
                     r"(hour|hours|minute|minutes|min|second|seconds|ساعة|ساعات|دقيقة|دقائق|ثانية|ثوان)", w)
     if rel:
-        n = int(rel.group(1))
+        n = int(rel.group(1)) if rel.group(1) else 1
         unit = rel.group(2)
         if unit in ("hour", "hours", "ساعة", "ساعات"):
             delta = n * 3600

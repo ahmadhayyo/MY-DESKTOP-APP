@@ -25,6 +25,10 @@ scheduled_jobs.json
 telegram_user.session
 *.session
 *.session-journal
+
+# Forged tools the agent writes for itself at runtime (user-generated, not source)
+tools/dynamic/*.py
+!tools/dynamic/__init__.py
 .browser_profile/
 .files/
 logs/

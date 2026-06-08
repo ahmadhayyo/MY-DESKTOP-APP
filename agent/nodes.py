@@ -457,6 +457,16 @@ def _get_llm_with_tools() -> BaseChatModel:
     return _llm_with_tools
 
 
+def refresh_tool_binding() -> None:
+    """
+    Invalidate the cached LLM↔tools binding so it rebuilds with the CURRENT tool
+    set. Called by the Capability Forge after a new tool is registered at runtime,
+    so the model can immediately choose to call the freshly-created tool.
+    """
+    global _llm_with_tools
+    _llm_with_tools = None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -768,6 +778,13 @@ If the user wants a TASK done:
   Write a short numbered plan with the CORRECT tool for each step.
 
 TOOL SELECTION RULES (choose the right tool from the start):
+• 🔥 NO existing tool fits the task? → BUILD one: forge_tool(tool_name, description,
+  python_code). Write a complete @tool function (returns a string), and it becomes
+  a permanent, live capability you can call on the very next step. Use this instead
+  of giving up. Examples it suits: a custom converter, a niche calculation, a small
+  format transformer, parsing a special string — anything no current tool covers.
+  After forging, CALL the new tool by its name. (Manage them: list_forged_tools,
+  inspect_forged_tool, remove_forged_tool.)
 • ANY web/factual question (scores, news, prices, facts, "who won", "latest", "what is")
                                    → web_search(query=...) or web_answer(query=...)
                                      ❌ NEVER open the browser to Google — it hits a CAPTCHA and FAILS.
@@ -1269,6 +1286,9 @@ def worker_node(state: AgentState) -> dict:
         "telegram_download(chat, message_id), telegram_list_chats(), telegram_status(), telegram_login(phone)\n"
         "     ← للبحث في مجموعاتك وتنزيل ملفاتها على سطح المكتب. إن رجع «بيانات API ناقصة» اطلب من المستخدم "
         "إعداد TELEGRAM_API_ID/HASH ثم telegram_login.\n"
+        "  🔥 مِصهر القدرات (يصنع أدوات جديدة لنفسه): forge_tool(tool_name, description, python_code), "
+        "list_forged_tools(), inspect_forged_tool(name), remove_forged_tool(name)\n"
+        "     ← إن لم توجد أداة تنجز المهمة، اصنعها بـ forge_tool ثم استدعِها فوراً.\n"
         "  🧠 الذاكرة الدائمة (عبر الجلسات): remember_fact(key, value, category), "
         "recall_facts(query), forget_fact(key), list_memory()\n"
         "     ← احفظ تفضيلات المستخدم والمسارات والمعلومات المتكررة، واسترجعها بدل سؤاله مجدداً.\n"

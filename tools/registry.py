@@ -478,9 +478,89 @@ def _load_market():
 _import_category("market", _load_market)
 
 
+# ═══════════════════════════════════════════════════════════
+# CAPABILITY FORGE — the agent writes & registers its own new tools at runtime
+# ═══════════════════════════════════════════════════════════
+def _load_forge():
+    from tools.forge_tools import (
+        forge_tool, list_forged_tools, inspect_forged_tool, remove_forged_tool,
+    )
+    return [forge_tool, list_forged_tools, inspect_forged_tool, remove_forged_tool]
+
+_import_category("forge", _load_forge)
+
+
+# ═══════════════════════════════════════════════════════════
+# DYNAMIC / FORGED TOOLS — capabilities the agent built for itself
+# Loaded from tools/dynamic/*.py so self-created tools persist across restarts.
+# ═══════════════════════════════════════════════════════════
+def _load_dynamic():
+    import importlib
+    import pkgutil
+    from pathlib import Path
+    dyn_dir = Path(__file__).resolve().parent / "dynamic"
+    dyn_dir.mkdir(exist_ok=True)
+    init = dyn_dir / "__init__.py"
+    if not init.exists():
+        init.write_text("", encoding="utf-8")
+    collected: list[BaseTool] = []
+    for mod in pkgutil.iter_modules([str(dyn_dir)]):
+        if mod.name.startswith("_"):
+            continue
+        try:
+            m = importlib.import_module(f"tools.dynamic.{mod.name}")
+            for attr in vars(m).values():
+                if isinstance(attr, BaseTool):
+                    collected.append(attr)
+        except Exception as exc:
+            logger.warning("⚠️ forged tool '%s' failed to load: %s", mod.name, exc)
+    return collected
+
+_import_category("dynamic", _load_dynamic)
+
+
 # ── Final exports ─────────────────────────────────────────────────────────────
 ALL_TOOLS: list[BaseTool] = _all_tools
 TOOLS_BY_NAME: dict[str, BaseTool] = {t.name: t for t in ALL_TOOLS}
+
+
+def register_tool(tool_obj: BaseTool) -> bool:
+    """
+    Register a tool into the LIVE registry at runtime (used by the Capability
+    Forge so a freshly-created tool is usable in the same session).
+
+    Mutates ALL_TOOLS and TOOLS_BY_NAME in place — and because nodes.TOOL_MAP IS
+    TOOLS_BY_NAME (same dict object), the worker can execute the new tool
+    immediately. The caller is responsible for refreshing the LLM tool-binding so
+    the model can also *choose* to call it.
+    """
+    if not isinstance(tool_obj, BaseTool):
+        return False
+    name = tool_obj.name
+    if name in TOOLS_BY_NAME:
+        # replace existing (hot-reload of a forged tool)
+        try:
+            idx = next(i for i, t in enumerate(ALL_TOOLS) if t.name == name)
+            ALL_TOOLS[idx] = tool_obj
+        except StopIteration:
+            ALL_TOOLS.append(tool_obj)
+    else:
+        ALL_TOOLS.append(tool_obj)
+    TOOLS_BY_NAME[name] = tool_obj
+    return True
+
+
+def unregister_tool(name: str) -> bool:
+    """Remove a tool from the live registry by name."""
+    if name not in TOOLS_BY_NAME:
+        return False
+    del TOOLS_BY_NAME[name]
+    try:
+        idx = next(i for i, t in enumerate(ALL_TOOLS) if t.name == name)
+        ALL_TOOLS.pop(idx)
+    except StopIteration:
+        pass
+    return True
 
 if _failed_categories:
     logger.warning(
