@@ -1021,6 +1021,20 @@ async def on_chat_start() -> None:
     cl.user_session.set("current_provider", saved_provider)
     _save_session(thread_id, saved_provider)
 
+    # Apply the saved provider to the engine so a UI model switch survives restart
+    # (only if its API key is present; otherwise keep the default).
+    try:
+        if saved_provider and saved_provider != _PROVIDER:
+            _key_vars = {"google": "GOOGLE_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
+                         "openai": "OPENAI_API_KEY", "deepseek": "DEEPSEEK_API_KEY",
+                         "groq": "GROQ_API_KEY", "ollama": ""}
+            _kv = _key_vars.get(saved_provider, "")
+            if saved_provider == "ollama" or os.getenv(_kv, "").strip():
+                from agent.nodes import switch_provider
+                switch_provider(saved_provider)
+    except Exception as _exc:
+        _logger.warning("Could not apply saved provider '%s': %s", saved_provider, _exc)
+
     # Build available models list for display
     available_models = []
     for key, info in _PROVIDERS.items():

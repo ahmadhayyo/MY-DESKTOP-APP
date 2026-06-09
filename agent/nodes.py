@@ -222,9 +222,16 @@ def _build_llm(role: Literal["main", "summarizer"], provider: str | None = None)
 
 
 def switch_provider(provider: str) -> None:
-    """Switch the LLM provider at runtime (called from Chainlit UI)."""
+    """Switch the LLM provider at runtime (called from Chainlit UI via /model).
+
+    CRITICAL: also update os.environ["MODEL_PROVIDER"] so that
+    _ensure_provider_match() (run at the start of every node) sees the SAME
+    provider and doesn't silently revert the switch back to the .env value on the
+    next message. This is process-only — it does NOT rewrite the .env file.
+    """
     global _main_llm, _fast_llm, _llm_with_tools, _PROVIDER
     _PROVIDER = provider.lower().strip()
+    os.environ["MODEL_PROVIDER"] = _PROVIDER   # keep runtime + env in sync
     _main_llm = _build_llm("main", _PROVIDER)
     _fast_llm = _build_llm("summarizer", _PROVIDER)
     _llm_with_tools = _build_tools_binding()
@@ -778,6 +785,16 @@ If the user wants a TASK done:
   Write a short numbered plan with the CORRECT tool for each step.
 
 TOOL SELECTION RULES (choose the right tool from the start):
+• 📨 Telegram — search chats/groups or find/download files ("ابحث في تيليجرام", "حمّل من قناة")
+  → ALWAYS use the API tools: telegram_search(query) / telegram_search_files(query, file_type)
+    / telegram_download(chat, message_id).
+  ❌ NEVER open the Telegram desktop app, and NEVER use launch_app_smart / windows_search /
+    screen_describe / app_interact for Telegram — clicking the desktop app loops and fails.
+  Typical plan for "ابحث عن ملف X في تيليجرام وحمّله على سطح المكتب":
+    1. telegram_search_files(query='X', file_type='apk'|'pdf'|...)
+    2. telegram_download(chat='<اسم القناة من النتيجة>', message_id=<الرقم>)
+  If a tool returns "غير مسجّل الدخول": STOP and tell the user to run once:
+    telegram_login(phone='+9665...') then telegram_verify_code(code='...').  Do NOT loop.
 • 🏗️ Build a Windows desktop app / make an .exe → build_desktop_app(app_name, python_code)
   does the whole pipeline in one call: writes the code, lints it, and compiles a
   professional .exe to the Desktop. Prefer tkinter (built-in, no extra installs).
