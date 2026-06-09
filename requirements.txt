@@ -49,6 +49,10 @@ pywin32>=306; sys_platform == "win32"
 # Pretty CLI logging
 rich>=13.7.0
 
+# Trust the OS (Windows) certificate store — fixes SSL failures behind a VPN /
+# corporate proxy that does TLS interception (e.g. Anthropic/Gemini connection errors)
+pip-system-certs>=4.0; sys_platform == "win32"
+
 # Office Documents (Excel, Word, PowerPoint, PDF)
 openpyxl>=3.1.2
 python-docx>=1.1.0

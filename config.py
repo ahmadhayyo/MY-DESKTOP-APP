@@ -92,7 +92,7 @@ if MODEL_PROVIDER not in ("anthropic", "google", "openai", "deepseek", "groq", "
 
 # ── Anthropic ────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY: str = _get("ANTHROPIC_API_KEY")
-ANTHROPIC_AGENT_MODEL: str = _get("ANTHROPIC_AGENT_MODEL", "claude-sonnet-4-20250514")
+ANTHROPIC_AGENT_MODEL: str = _get("ANTHROPIC_AGENT_MODEL", "claude-sonnet-4-6")
 ANTHROPIC_SUMMARIZER_MODEL: str = _get(
     "ANTHROPIC_SUMMARIZER_MODEL", "claude-haiku-4-5-20251001"
 )
@@ -176,7 +176,8 @@ AVAILABLE_PROVIDERS: dict[str, dict] = {
         "label": "Anthropic Claude",
         "icon": "🟠",
         "key_var": "ANTHROPIC_API_KEY",
-        "models": ["claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-haiku-4-5-20251001"],
+        "models": ["claude-sonnet-4-6", "claude-sonnet-4-5-20250929", "claude-opus-4-8",
+                   "claude-haiku-4-5-20251001", "claude-sonnet-4-20250514"],
     },
     "openai": {
         "label": "OpenAI ChatGPT",
