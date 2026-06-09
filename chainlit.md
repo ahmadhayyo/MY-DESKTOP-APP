@@ -1,14 +1,20 @@
-# Welcome to Chainlit! 🚀🤖
+# 🤖 HAYO — وكيلك الذكي خارق القدرات
 
-Hi there, Developer! 👋 We're excited to have you on board. Chainlit is a powerful tool designed to help you prototype, debug and share applications built on top of LLMs.
+مرحباً! أنا **HAYO**، أنفّذ مهامك على حاسوبك من البداية للنهاية.
 
-## Useful Links 🔗
+اختر بطاقة بالأسفل للبدء بنقرة، أو اكتب طلبك مباشرةً.
 
-- **Documentation:** Get started with our comprehensive [Chainlit Documentation](https://docs.chainlit.io) 📚
-- **Discord Community:** Join our friendly [Chainlit Discord](https://discord.gg/k73SQ3FyUh) to ask questions, share your projects, and connect with other developers! 💬
+---
 
-We can't wait to see what you create with Chainlit! Happy coding! 💻😊
+### ما أستطيع فعله
+- 🖥️ **النظام والملفات** — أوامر، إدارة، بحث، تنظيم
+- 📊 **Office** — Word · Excel · PowerPoint احترافية على سطح المكتب
+- 🌐 **الويب** — بحث، قراءة دراسات، تحميل، أتمتة المتصفح
+- 🏗️ **بناء التطبيقات** — من الكود إلى ملف EXE
+- 🔥 **مِصهر القدرات** — أصنع أدواتي بنفسي عند الحاجة
+- 💹 **الأسواق** — تحليل فنّي ورسوم بيانية حيّة
+- 🔌 **التكاملات** — GitHub · Google Drive · Telegram · Railway · Discord · بريد · والمزيد
 
-## Welcome screen
+---
 
-To modify the welcome screen, edit the `chainlit.md` file at the root of your project. If you do not want a welcome screen, just leave this file empty.
+💡 اكتب **`/help`** لكل الأوامر · **`/integrations`** للتكاملات · **`/model`** لتغيير النموذج

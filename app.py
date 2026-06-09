@@ -1107,6 +1107,16 @@ async def on_chat_start() -> None:
     except Exception:
         pass
 
+    # ── Welcome message ───────────────────────────────────────────────────────
+    # IMPORTANT: Chainlit shows the clickable Starter cards ONLY while the chat is
+    # empty. Sending this welcome message immediately would fill the chat and make
+    # the starters disappear (the "flips back to old look" the user saw). So we
+    # ONLY send the full welcome when RESUMING a session (which already has history,
+    # so starters wouldn't show anyway). For a fresh chat we stay silent and let the
+    # Starter cards + chainlit.md be the welcome screen.
+    if not (has_work and last_thread):
+        return
+
     await cl.Message(
         content=(
             "# 🤖 HAYO AI Agent — وكيل ذكي خارق القدرات\n\n"
