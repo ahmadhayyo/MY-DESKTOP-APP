@@ -427,28 +427,60 @@ _CORE_TOOL_NAMES = {
     "screen_wait_for_text", "screen_capture_region", "screen_compare_changes",
     # ── Windows Power Control ──────────────────────────────────────────────
     "windows_search", "window_manager", "get_active_window",
-    "type_in_window", "drag_and_drop", "open_settings_page",
-    "power_action", "set_wallpaper", "get_system_details",
-    "run_as_admin", "windows_toast_notification", "app_exists",
-    "manage_startup_apps",
+    "type_in_window", "open_settings_page",
+    "power_action", "get_system_details", "app_exists",
+    "launch_app_smart",
+    # ── Web research (CAPTCHA-free) ────────────────────────────────────────
+    "web_search", "web_answer", "read_webpage",
+    # ── Computer use ───────────────────────────────────────────────────────
+    "screen_describe", "app_interact", "type_text_clipboard", "handle_verification_screen",
+    # ── Office PRO (Word / Excel / PowerPoint) ─────────────────────────────
+    "excel_set_formula", "excel_add_total_row", "excel_add_chart", "excel_style_report",
+    "word_add_heading", "word_add_paragraph", "word_add_table", "word_add_list", "word_set_rtl",
+    "ppt_create", "ppt_add_bullets", "ppt_add_table", "ppt_add_chart", "ppt_set_theme", "ppt_to_pdf",
+    "convert_word_to_pdf", "convert_excel_to_pdf", "pdf_create",
+    # ── Integrations ───────────────────────────────────────────────────────
+    "send_discord", "send_email", "http_request", "get_weather", "get_crypto_price", "telegram_bot_send",
+    # ── Long-term memory + scheduler ───────────────────────────────────────
+    "remember_fact", "recall_facts", "list_memory",
+    "schedule_task", "list_scheduled_tasks", "cancel_scheduled_task",
+    # ── Telegram (user account) ────────────────────────────────────────────
+    "telegram_search", "telegram_search_files", "telegram_download",
+    "telegram_status", "telegram_login", "telegram_verify_code",
+    # ── Markets ────────────────────────────────────────────────────────────
+    "market_quote", "market_analyze", "market_chart", "market_news",
+    # ── Desktop app builder ────────────────────────────────────────────────
+    "build_desktop_app", "lint_python", "build_exe", "run_executable",
+    # ── Capability forge (self-extension) ──────────────────────────────────
+    "forge_tool", "list_forged_tools", "inspect_forged_tool",
+    # ── GitHub (core two; others reachable via execution map) ──────────────
+    "github_clone", "github_status",
 }
 
 
-def _select_tools_for_ollama(tools: list) -> list:
-    """Select a subset of tools optimized for Ollama's context window.
+def _select_tools(tools: list, budget: int) -> list:
+    """Select up to `budget` tools, prioritising the curated core set.
 
-    Always includes all core tools. llama3.1 has 8192-token context so we
-    can afford ~65 tools comfortably (was 45 with llama3.2:3b / 4096 tokens).
+    Most LLM APIs (Groq/OpenAI/DeepSeek) HARD-CAP at 128 tools per request — and
+    sending all ~240 tool schemas every call is also very expensive in tokens. So
+    we always keep the core/feature tools and fill the rest up to `budget`.
     """
+    if len(tools) <= budget:
+        return tools
     core = [t for t in tools if t.name in _CORE_TOOL_NAMES]
     extra = [t for t in tools if t.name not in _CORE_TOOL_NAMES]
-
-    # Budget: allow up to 80 total tools for Ollama (llama3.1 / 8192-token context)
-    budget = max(0, 80 - len(core))
-    selected = core + extra[:budget]
-    logger.info("Ollama tool selection: %d/%d tools (core=%d, extra=%d)",
-                len(selected), len(tools), len(core), min(budget, len(extra)))
+    if len(core) >= budget:
+        selected = core[:budget]
+    else:
+        selected = core + extra[: max(0, budget - len(core))]
+    logger.info("Tool selection: %d/%d tools (core=%d, budget=%d)",
+                len(selected), len(tools), len(core), budget)
     return selected
+
+
+def _select_tools_for_ollama(tools: list) -> list:
+    """Ollama has a small context window — keep the tool list tight (~80)."""
+    return _select_tools(tools, budget=80)
 
 
 def _build_tools_binding():
@@ -469,9 +501,13 @@ def _build_tools_binding():
     else:
         _react_mode = False
         _react_tool_prompt = ""
-        # For Ollama with limited context, send only categorized tools
+        # Cap the tool list per provider:
+        #  • Ollama  → ~80 (small context)
+        #  • others  → ≤126 (Groq/OpenAI/DeepSeek hard-limit is 128; margin of safety)
         if _PROVIDER == "ollama":
             active_tools = _select_tools_for_ollama(active_tools)
+        else:
+            active_tools = _select_tools(active_tools, budget=126)
         try:
             return main.bind_tools(active_tools)
         except Exception as exc:
