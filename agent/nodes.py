@@ -1464,6 +1464,40 @@ def worker_node(state: AgentState) -> dict:
             if not tool_id:
                 tool_id = f"missing_id_{uuid.uuid4()}"
 
+            # ── Telegram routing guard ───────────────────────────────────────
+            # If the task is about Telegram and the model tries to OPEN the desktop
+            # app or drive it via screen tools, that loops forever (OCR clicking).
+            # Force it onto the Telethon API tools instead, and stop the loop.
+            _tg_words = ["telegram", "تلجرام", "تليجرام", "التلجرام", "التليجرام", "تيليجرام"]
+            _ctx = " ".join(
+                (m.content if isinstance(m.content, str) else "")
+                for m in (messages[-6:] + new_messages[-6:])
+            ).lower()
+            _task_tg = any(w in _ctx for w in _tg_words)
+            _args_tg = any(w in str(tool_args).lower() for w in _tg_words)
+            _desktop_tool = tool_name in (
+                "launch_app_smart", "windows_search", "open_app", "app_exists",
+            )
+            _screen_tool = tool_name in ("screen_describe", "app_interact",
+                                         "screen_read_text", "screen_find_and_click")
+            if _task_tg and ((_desktop_tool and _args_tg) or _screen_tool):
+                result = (
+                    "⚡ [توجيه إلزامي] مهام تيليجرام (بحث/تحميل) تُنفَّذ عبر الـ API فقط، "
+                    "لا بفتح تطبيق سطح المكتب ولا بـ screen_describe.\n"
+                    "استخدم الآن: telegram_search_files(query='...', file_type='apk') ثم "
+                    "telegram_download(chat='...', message_id=...).\n"
+                    "إن رجعت «غير مسجّل الدخول»: توقّف فوراً وأبلغ المستخدم أن ينفّذ مرة واحدة: "
+                    "telegram_login(phone='+9665...') ثم telegram_verify_code(code='...'). "
+                    "لا تفتح أي تطبيق ولا تكرّر screen_describe."
+                )
+                new_messages.append(ToolMessage(content=result, tool_call_id=tool_id))
+                tool_call_history = record_tool_call(
+                    tool_name=f"TG_REDIRECT:{tool_name}", tool_args=tool_args, result=result,
+                    tool_history=tool_call_history, max_history=20,
+                )
+                error_logs.append(f"[iter {iteration+1}] Telegram redirect: blocked {tool_name}")
+                continue
+
             # ── Check for duplicate tool call ────────────────────────────────
             if is_duplicate_tool_call(tool_name, tool_args, tool_call_history, recent_count=2):
                 # Give the model actionable guidance based on which tool is looping

@@ -1034,6 +1034,35 @@ async def _show_commands_sidebar() -> None:
         _logger.warning("Could not set commands sidebar: %s", exc)
 
 
+def _quick_actions() -> list:
+    """Clickable command buttons attached to a message (run the command on click)."""
+    items = [
+        ("🔌 التكاملات", "/integrations"),
+        ("🔄 النموذج", "/model"),
+        ("📋 كل الأوامر", "/help"),
+        ("🆕 محادثة جديدة", "/new"),
+        ("📊 تقرير Excel", "أنشئ تقرير مبيعات Excel من بيانات تجريبية ونسّقه على سطح المكتب"),
+        ("🏗️ ابنِ تطبيق", "ابنِ تطبيق آلة حاسبة بواجهة رسومية وحوّله إلى exe على سطح المكتب"),
+    ]
+    return [
+        cl.Action(name="run_cmd", label=label, payload={"cmd": cmd})
+        for label, cmd in items
+    ]
+
+
+@cl.action_callback("run_cmd")
+async def _on_quick_action(action: cl.Action):
+    """When a quick-action button is clicked, run its command as a normal message."""
+    cmd = (action.payload or {}).get("cmd", "")
+    if not cmd:
+        return
+    try:
+        await action.remove()
+    except Exception:
+        pass
+    await on_message(cl.Message(content=cmd))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Starters — clickable command cards on the welcome screen
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1170,44 +1199,15 @@ async def on_chat_start() -> None:
     if not (has_work and last_thread):
         return
 
+    # Compact resume welcome + CLICKABLE action buttons (real buttons, unlike the
+    # sidebar which is a text reference). Clicking a button runs that command.
     await cl.Message(
         content=(
-            "# 🤖 HAYO AI Agent — وكيل ذكي خارق القدرات\n\n"
-            f"**النموذج الحالي**: {_get_model_display(saved_provider)}\n"
-            f"**الجلسة**: `{thread_id[:8]}…`{resume_note}\n\n"
-            "---\n\n"
+            f"### 🤖 HAYO جاهز · النموذج: {_get_model_display(saved_provider)}{resume_note}\n"
             f"{history_block}"
-            "### 🎙️ الدردشة الصوتية\n"
-            f"الاستماع للصوت (STT): {voice_status}\n"
-            "الرد الصوتي (TTS): ✅ جاهز — Edge TTS مجاني\n\n"
-            "**الأوامر الصوتية**:\n"
-            "  • `/voice on` / `off` — تفعيل/تعطيل الرد الصوتي\n"
-            "  • `/voice <اسم>` — تغيير الصوت (salma, shakir, zariyah, hamed, aria, guy)\n"
-            "  • اضغط 🎙️ في حقل الإدخال لتسجيل صوتك مباشرة\n\n"
-            "**أوامر الذاكرة**:\n"
-            "  • 📂 **القائمة الجانبية** — اضغط على محادثة سابقة لاستعادتها\n"
-            "  • `/history` — قائمة المحادثات السابقة\n"
-            "  • `/load <id>` — استعادة محادثة (مثال: `/load a1b2c3d4`)\n"
-            "  • `/new` — بدء محادثة جديدة في نفس النافذة\n\n"
-            "---\n\n"
-            "### القدرات:\n"
-            "🖥️ النظام · 📁 الملفات · 🌐 المتصفح · 🖱️ سطح المكتب · 📋 الحافظة\n"
-            "🌍 الشبكة · 🔊 الصوت · 📊 Office · 🎬 تحويل ملفات · 🎵 تحميل أغاني YouTube\n"
-            "🔗 GitHub · 📁 Google Drive · 🖼️ تحليل الصور\n\n"
-            "---\n\n"
-            "### النماذج المتاحة:\n"
-            f"{models_display}\n\n"
-            "💡 لتغيير النموذج: `/model google` | `/model anthropic` | `/model deepseek` | `/model groq` | `/model ollama`\n\n"
-            "---\n\n"
-            "### أوامر جديدة:\n"
-            "🔌 `/integrations` — مركز التكاملات (GitHub, Google Drive, Telegram...)\n"
-            "🧩 `/plugins` — الإضافات المخصصة\n"
-            "⚙️ `/settings` — الإعدادات\n"
-            "📋 `/tasks` — سجل المهام\n"
-            "📤 `/export` — تصدير المحادثة\n\n"
-            "---\n\n"
-            "**أخبرني بما تريد — سأتذكر كل شيء قلته في هذه المحادثة.**"
-        )
+            "اضغط زرّاً بالأسفل، أو اكتب طلبك. كل الأوامر في اللوحة الجانبية 📋"
+        ),
+        actions=_quick_actions(),
     ).send()
 
 
