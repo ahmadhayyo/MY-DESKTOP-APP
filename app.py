@@ -585,6 +585,13 @@ async def _run_graph(input_or_command, config: dict) -> None:
                 continue
 
     except Exception as exc:
+        _exc_str = str(exc).lower()
+        _is_conn = (
+            type(exc).__name__ in ("ConnectionError", "ConnectError")
+            or any(k in _exc_str for k in (
+                "10061", "connection refused", "actively refused",
+                "connect error", "تعذّر الاتصال", "ollama"))
+        )
         # GraphRecursionError = LangGraph step ceiling. With recursion_limit now
         # set well above 2*MAX_ITERATIONS this should be rare, but if a task is
         # genuinely huge, tell the user how to continue instead of a raw trace.
@@ -594,6 +601,19 @@ async def _run_graph(input_or_command, config: dict) -> None:
                     "⏸️ **المهمة طويلة جداً ووصلت حد الخطوات المؤقت.**\n\n"
                     "أنجزت جزءاً كبيراً — اكتب **أكمل** لأتابع من حيث توقفت حتى الانتهاء.\n"
                     "_(لرفع الحد دائماً: `/settings set MAX_ITERATIONS 200`)_"
+                )
+            ).send()
+        elif _is_conn:
+            # LLM/provider unreachable — show ONCE and flag so the autonomous loop
+            # does NOT keep retrying (the cause of the repeated error spam).
+            cl.user_session.set("_llm_unreachable", True)
+            await cl.Message(
+                content=(
+                    "🔌 **تعذّر الاتصال بالنموذج.**\n\n"
+                    f"{exc}\n\n"
+                    "— إن كنت على Ollama: افتح تطبيق Ollama أو شغّل `ollama serve` "
+                    "(يحاول الوكيل تشغيله تلقائياً)، وتأكد: `ollama list`.\n"
+                    "— أو بدّل لنموذج سحابي جاهز: **/model groq**"
                 )
             ).send()
         else:
@@ -835,6 +855,12 @@ async def _auto_continue_until_done(config: dict) -> None:
     global GRAPH
     if GRAPH is None:
         GRAPH = _get_graph()
+
+    # If the LLM was unreachable this turn, do NOT auto-retry — that just spams the
+    # same connection error. Clear the flag and bail.
+    if cl.user_session.get("_llm_unreachable"):
+        cl.user_session.set("_llm_unreachable", False)
+        return
 
     if str(os.getenv("AUTO_CONTINUE", "true")).lower() in ("false", "0", "no", "off"):
         return

@@ -74,9 +74,74 @@ _PROVIDER = os.getenv("MODEL_PROVIDER", "google").lower().strip()
 
 # ── LLM Factory ───────────────────────────────────────────────────────────────
 
+_ollama_checked = False
+
+
+def _ollama_reachable(base_url: str) -> bool:
+    import urllib.request
+    import urllib.error
+    try:
+        urllib.request.urlopen(base_url, timeout=2)
+        return True
+    except urllib.error.HTTPError:
+        return True   # server responded (even 404) → it's up
+    except Exception:
+        return False
+
+
+def _ensure_ollama_running(timeout: int = 15) -> bool:
+    """
+    Make sure the local Ollama server is up. If it's installed but not running
+    (the common 'connection refused / WinError 10061' case), start `ollama serve`
+    in the background and wait until it answers. Returns True if reachable.
+    """
+    import os as _os
+    import shutil
+    import subprocess
+    import time as _t
+
+    base = _os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    if _ollama_reachable(base):
+        return True
+
+    # locate the ollama executable
+    exe = shutil.which("ollama")
+    if not exe:
+        for cand in (
+            _os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe"),
+            _os.path.expandvars(r"%PROGRAMFILES%\Ollama\ollama.exe"),
+        ):
+            if _os.path.isfile(cand):
+                exe = cand
+                break
+    if not exe:
+        logger.warning("Ollama not found on PATH — cannot auto-start.")
+        return False
+
+    try:
+        logger.info("Ollama not running — starting `ollama serve` in background…")
+        subprocess.Popen(
+            [exe, "serve"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
+        )
+    except Exception as e:
+        logger.warning("Failed to start ollama serve: %s", e)
+        return False
+
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        _t.sleep(1.0)
+        if _ollama_reachable(base):
+            logger.info("✅ Ollama server is now running.")
+            return True
+    logger.warning("Ollama did not become reachable within %ds.", timeout)
+    return False
+
+
 def _build_llm(role: Literal["main", "summarizer"], provider: str | None = None) -> BaseChatModel:
     """Return the correct LangChain chat model based on provider.
-    
+
     If provider is None, uses _PROVIDER (from .env MODEL_PROVIDER).
     This allows runtime model switching from the UI.
     """
@@ -188,6 +253,13 @@ def _build_llm(role: Literal["main", "summarizer"], provider: str | None = None)
 
     elif prov == "ollama":
         from langchain_ollama import ChatOllama
+
+        # Auto-start the local Ollama server if it's installed but not running
+        # (fixes 'connection refused / WinError 10061'). Best-effort; once per build.
+        global _ollama_checked
+        if not _ollama_checked:
+            _ollama_checked = True
+            _ensure_ollama_running()
 
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         timeout = int(os.getenv("OLLAMA_TIMEOUT", "300"))
@@ -584,6 +656,13 @@ def _safe_llm_invoke(llm, messages: list[BaseMessage], *, label: str = "LLM") ->
             ))
 
             if is_connection_err and attempt < max_retries:
+                # For Ollama, a 'connection refused' usually means the server is
+                # down — try to (re)start it before backing off, so the next
+                # attempt can actually succeed.
+                if _PROVIDER == "ollama" and any(
+                    k in err_str for k in ("refused", "10061", "connect error", "unreachable")
+                ):
+                    _ensure_ollama_running()
                 backoff = 2 ** (attempt + 1)
                 logger.warning(
                     "[%s] Attempt %d/%d failed (connection): %s — retrying in %ds",
@@ -595,25 +674,20 @@ def _safe_llm_invoke(llm, messages: list[BaseMessage], *, label: str = "LLM") ->
             if is_connection_err:
                 logger.error("[%s] Connection/timeout error after %d attempts: %s",
                              label, attempt + 1, err)
+                # RAISE (don't return an error-as-content) so the graph STOPS here
+                # instead of feeding the error into the next node and looping
+                # planner→worker→reviewer endlessly. app.py shows it once.
                 if _PROVIDER == "ollama":
-                    return AIMessage(
-                        content=(
-                            f"❌ خطأ في الاتصال بنموذج Ollama بعد {attempt + 1} محاولات: {err}\n\n"
-                            "تأكد من:\n"
-                            "1. Ollama يعمل: افتح Terminal واكتب `ollama serve`\n"
-                            "2. النموذج محمّل: `ollama list`\n"
-                            "3. إذا النموذج بطيء، جرب نموذج أخف: `ollama pull llama3.2`\n\n"
-                            "أو غيّر النموذج: `/model google`"
-                        )
+                    raise ConnectionError(
+                        "تعذّر الاتصال بخادم Ollama المحلي (غير مُشغّل أو رفض الاتصال).\n"
+                        "الحل: افتح تطبيق Ollama، أو شغّل في Terminal: ollama serve\n"
+                        "ثم تأكد أن النموذج محمّل: ollama list\n"
+                        "أو بدّل لنموذج سحابي: /model groq"
                     )
-                else:
-                    return AIMessage(
-                        content=(
-                            f"❌ خطأ في الاتصال بنموذج {_PROVIDER}: {err}\n\n"
-                            "تأكد من اتصالك بالإنترنت وصحة مفتاح API.\n"
-                            "أو جرب نموذج آخر: `/model ollama` (مجاني محلي)"
-                        )
-                    )
+                raise ConnectionError(
+                    f"تعذّر الاتصال بنموذج {_PROVIDER}: {err}.\n"
+                    "تحقّق من الإنترنت ومفتاح API، أو بدّل النموذج: /model ollama"
+                )
 
             # Non-connection error — try with simplified messages
             break
