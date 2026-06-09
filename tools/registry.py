@@ -479,6 +479,20 @@ _import_category("market", _load_market)
 
 
 # ═══════════════════════════════════════════════════════════
+# INTEGRATIONS — real connectors (Discord/Slack/Telegram-bot/Email/Notion/HTTP/…)
+# ═══════════════════════════════════════════════════════════
+def _load_integrations():
+    from tools.integration_tools import (
+        send_discord, send_slack, telegram_bot_send, send_email,
+        notion_create_page, http_request, get_weather, get_crypto_price,
+    )
+    return [send_discord, send_slack, telegram_bot_send, send_email,
+            notion_create_page, http_request, get_weather, get_crypto_price]
+
+_import_category("integrations", _load_integrations)
+
+
+# ═══════════════════════════════════════════════════════════
 # APP BUILDER — write code → lint → compile a Windows .exe (PyInstaller)
 # ═══════════════════════════════════════════════════════════
 def _load_app_builder():

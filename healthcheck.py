@@ -178,7 +178,19 @@ def _appbuilder():
     return "PyInstaller + tkinter + lint ready (full build ~30-60s)"
 
 
-# ── 13. Web search (network — WARN if offline) ────────────────────────────────
+# ── 13. Integrations (live data, network) ─────────────────────────────────────
+def _integrations():
+    from tools.integration_tools import get_crypto_price, send_discord
+    # zero-config live call
+    r = get_crypto_price.invoke({"symbol": "bitcoin"})
+    assert "$" in r or "Bitcoin" in r, f"crypto fetch failed: {r}"
+    # graceful degradation when a key is missing (must not crash)
+    d = send_discord.invoke({"message": "x"})
+    assert d.startswith("❌") or d.startswith("✅"), "discord did not degrade gracefully"
+    return "live data OK + graceful key-missing handling"
+
+
+# ── 14. Web search (network — WARN if offline) ────────────────────────────────
 def _websearch():
     from tools.web_search_tools import _ddg_text
     r = _ddg_text("python programming", 2)
@@ -202,7 +214,8 @@ def main():
     check("10. Memory-DB pruning", _maintenance)
     check("11. Capability Forge (self-extend)", _forge)
     check("12. Desktop app builder (EXE)", _appbuilder)
-    check("13. Web search (network)", _websearch, network=True)
+    check("13. Integrations (live data)", _integrations, network=True)
+    check("14. Web search (network)", _websearch, network=True)
 
     print()
     npass = sum(1 for s, _, _ in results if s == PASS)
