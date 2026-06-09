@@ -100,7 +100,7 @@ ANTHROPIC_SUMMARIZER_MODEL: str = _get(
 # ── Google Gemini ────────────────────────────────────────────────────────────
 GOOGLE_API_KEY: str = _get("GOOGLE_API_KEY")
 GOOGLE_AGENT_MODEL: str = _get("GOOGLE_AGENT_MODEL", "gemini-2.5-flash")
-GOOGLE_SUMMARIZER_MODEL: str = _get("GOOGLE_SUMMARIZER_MODEL", "gemini-2.0-flash")
+GOOGLE_SUMMARIZER_MODEL: str = _get("GOOGLE_SUMMARIZER_MODEL", "gemini-2.5-flash-lite")
 
 # ── OpenAI (ChatGPT) ────────────────────────────────────────────────────────
 OPENAI_API_KEY: str = _get("OPENAI_API_KEY")

@@ -644,12 +644,46 @@ def _safe_llm_invoke(llm, messages: list[BaseMessage], *, label: str = "LLM") ->
     max_retries = 3 if _PROVIDER == "ollama" else 1
     last_err = None
 
-    for attempt in range(max_retries + 1):
+    # Rate-limit retries: free tiers (esp. Gemini) throttle by requests/minute.
+    # Wait the server-suggested delay and retry instead of failing the task.
+    rate_attempts = 0
+    max_rate_retries = int(os.getenv("RATE_LIMIT_RETRIES", "4"))
+
+    attempt = 0
+    while attempt <= max_retries:
         try:
             return llm.invoke(messages)
         except Exception as err:
             last_err = err
             err_str = str(err).lower()
+
+            # ── Rate limit / quota (HTTP 429) ─────────────────────────────────
+            is_rate_limit = any(kw in err_str for kw in (
+                "429", "resource_exhausted", "rate limit", "ratelimit",
+                "too many requests", "quota",
+            )) and "limit: 0" not in err_str  # 'limit: 0' = model not free at all
+            if is_rate_limit and rate_attempts < max_rate_retries:
+                rate_attempts += 1
+                # try to honor the server's retryDelay (e.g. "retryDelay': '20s'")
+                import re as _re
+                m = _re.search(r"retry(?:delay|_delay)['\":\s]+(\d+)", err_str)
+                wait_s = int(m.group(1)) if m else 0
+                if not wait_s:
+                    m2 = _re.search(r"retry in (\d+)", err_str)
+                    wait_s = int(m2.group(1)) if m2 else 18
+                wait_s = min(max(wait_s + 1, 5), 60)
+                logger.warning("[%s] Rate limited (429) — waiting %ds then retrying (%d/%d)",
+                               label, wait_s, rate_attempts, max_rate_retries)
+                _time.sleep(wait_s)
+                continue
+            if is_rate_limit:
+                raise ConnectionError(
+                    "تجاوزت حدّ الطلبات المجاني للنموذج (429). انتظر دقيقة وحاول، "
+                    "أو بدّل لنموذج بحدود أعلى: /model groq (أسرع للمهام الكثيفة)، "
+                    "أو قلّل الخطوات. إن ظهر 'limit: 0' فالنموذج غير متاح مجاناً — "
+                    "استخدم gemini-2.5-flash أو Groq."
+                )
+
             is_connection_err = any(kw in err_str for kw in (
                 "connection refused", "timed out", "timeout",
                 "connect error", "unreachable", "connection reset",
@@ -669,6 +703,7 @@ def _safe_llm_invoke(llm, messages: list[BaseMessage], *, label: str = "LLM") ->
                     label, attempt + 1, max_retries + 1, err, backoff,
                 )
                 _time.sleep(backoff)
+                attempt += 1   # while-loop: must advance to avoid an infinite loop
                 continue
 
             if is_connection_err:
