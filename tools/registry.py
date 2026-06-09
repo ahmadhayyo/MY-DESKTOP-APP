@@ -493,6 +493,22 @@ _import_category("integrations", _load_integrations)
 
 
 # ═══════════════════════════════════════════════════════════
+# RAILWAY — manage deployments via the official GraphQL API
+# ═══════════════════════════════════════════════════════════
+def _load_railway():
+    from tools.railway_tools import (
+        railway_status, railway_projects, railway_services,
+        railway_deployments, railway_logs, railway_redeploy,
+        railway_variables, railway_graphql,
+    )
+    return [railway_status, railway_projects, railway_services,
+            railway_deployments, railway_logs, railway_redeploy,
+            railway_variables, railway_graphql]
+
+_import_category("railway", _load_railway)
+
+
+# ═══════════════════════════════════════════════════════════
 # APP BUILDER — write code → lint → compile a Windows .exe (PyInstaller)
 # ═══════════════════════════════════════════════════════════
 def _load_app_builder():
