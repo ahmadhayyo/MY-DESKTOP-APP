@@ -625,36 +625,44 @@ async def _run_graph(input_or_command, config: dict) -> None:
             reviewer_final_text = "".join(reviewer_iter_raw)
             reviewer_iter_raw.clear()
 
-        # ── Write final reviewer answer to main bubble ────────────────────────
+        # ── Build the final reviewer answer ───────────────────────────────────
         # DeepSeek often echoes back the input context (progress_note, system prompt
         # examples) before writing its actual verdict. We eliminate all preamble by
         # slicing from the LAST occurrence of "TASK_COMPLETE" or "FAILED".
-        # Using rfind ensures we skip any earlier mentions in echoed system-prompt
-        # examples and land on the real verdict line.
-        if reviewer_final_text:
-            _tc  = reviewer_final_text.rfind("TASK_COMPLETE")
-            _fl  = reviewer_final_text.rfind("FAILED")
+        _final_source = reviewer_final_text or "".join(reviewer_buf)
+        clean_rev = ""
+        _verdict = ""
+        if _final_source:
+            _tc = _final_source.rfind("TASK_COMPLETE")
+            _fl = _final_source.rfind("FAILED")
             _idx = max(_tc, _fl)
-            _verdict_text = reviewer_final_text[_idx:] if _idx >= 0 else reviewer_final_text
+            _verdict = "FAILED" if (_fl > _tc) else ("TASK_COMPLETE" if _tc >= 0 else "")
+            _verdict_text = _final_source[_idx:] if _idx >= 0 else _final_source
             clean_rev = _filter_internal_tokens(_verdict_text)
-            if clean_rev.strip():
-                await response_msg.stream_token(clean_rev)
-                final_text_buf.append(clean_rev)
-        elif reviewer_buf:
-            # Fallback: no final iteration saved — apply rfind on the full buffer
-            _all = "".join(reviewer_buf)
-            _tc  = _all.rfind("TASK_COMPLETE")
-            _fl  = _all.rfind("FAILED")
-            _idx = max(_tc, _fl)
-            _verdict_text = _all[_idx:] if _idx >= 0 else _all
-            clean_rev = _filter_internal_tokens(_verdict_text)
-            if clean_rev.strip():
-                await response_msg.stream_token(clean_rev)
-                final_text_buf.append(clean_rev)
+            # strip the leading verdict token for clean display
+            for _pref in ("TASK_COMPLETE:", "FAILED:", "TASK_COMPLETE", "FAILED"):
+                if clean_rev.strip().startswith(_pref):
+                    clean_rev = clean_rev.strip()[len(_pref):].strip()
+                    break
 
         await _close_worker_step()
         await _close_active_step()
-        await response_msg.update()
+
+        # ── Place the final report at the BOTTOM of the chat ──────────────────
+        # The top bubble (response_msg) holds the collapsible steps. Streaming the
+        # report into it would push the answer ABOVE the steps, forcing the user to
+        # scroll up. Instead: keep the top bubble as a one-line status, and send the
+        # full report as a NEW message so it lands at the bottom, after the steps.
+        if clean_rev.strip() and not is_conversational:
+            _badge = "✅ **اكتملت المهمة**" if _verdict == "TASK_COMPLETE" else (
+                "❌ **تعذّر إكمال المهمة**" if _verdict == "FAILED" else "📋 **النتيجة**")
+            response_msg.content = f"{_badge} — التقرير في الأسفل ⬇️"
+            await response_msg.update()
+            await cl.Message(content=clean_rev).send()   # ← bottom of the chat
+            final_text_buf.append(clean_rev)
+        else:
+            # conversational reply was already streamed into response_msg
+            await response_msg.update()
 
     # ── Voice mode: synthesize and attach audio ──────────────────────────────
     if cl.user_session.get("voice_mode") and final_text_buf:
@@ -977,6 +985,29 @@ async def _run_scheduled_job(job: dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Starters — clickable command cards on the welcome screen
+# ─────────────────────────────────────────────────────────────────────────────
+@cl.set_starters
+async def set_starters():
+    """Ready-made, organized action cards shown on a new chat (click to run)."""
+    return [
+        cl.Starter(label="🔌 التكاملات", message="/integrations"),
+        cl.Starter(label="🔄 تغيير النموذج", message="/model"),
+        cl.Starter(label="📋 كل الأوامر", message="/help"),
+        cl.Starter(label="📊 تقرير Excel احترافي",
+                   message="أنشئ تقرير مبيعات Excel من بيانات تجريبية، أضف صف إجمالي ورسماً بيانياً ونسّقه على سطح المكتب"),
+        cl.Starter(label="🏗️ ابنِ تطبيق EXE",
+                   message="ابنِ تطبيق آلة حاسبة بسيط بواجهة رسومية وحوّله إلى ملف exe على سطح المكتب"),
+        cl.Starter(label="📚 بحث ودراسة",
+                   message="ابحث في الويب عن أفضل ممارسات إدارة الوقت واكتب دراسة منظّمة في ملف Word على سطح المكتب"),
+        cl.Starter(label="💹 تحليل سوق",
+                   message="حلّل زوج EUR/USD على فريم الساعة وأعطني قراءة فنية"),
+        cl.Starter(label="🌤️ الطقس الآن",
+                   message="كم درجة الحرارة في الرياض الآن؟"),
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Chainlit hooks
 # ─────────────────────────────────────────────────────────────────────────────
 @cl.on_chat_start
@@ -1293,6 +1324,46 @@ async def on_message(message: cl.Message) -> None:
     _save_session(thread_id)
 
     user_text = message.content.strip()
+
+    # ── Help / commands reference ─────────────────────────────────────────────
+    if user_text.lower() in ("/help", "/الاوامر", "/الأوامر", "/commands", "help", "مساعدة"):
+        await cl.Message(content=(
+            "# 📋 دليل أوامر HAYO\n\n"
+            "### 🔄 النموذج والإعدادات\n"
+            "| الأمر | الوظيفة |\n|---|---|\n"
+            "| `/model` | عرض النموذج الحالي والخيارات |\n"
+            "| `/model groq` | التبديل إلى Groq (أو deepseek/google/openai/anthropic/ollama) |\n"
+            "| `/settings` | الإعدادات (MAX_ITERATIONS…) |\n\n"
+            "### 🔌 التكاملات\n"
+            "| الأمر | الوظيفة |\n|---|---|\n"
+            "| `/integrations` | مركز التكاملات وحالتها |\n"
+            "| `/connect <خدمة>` | تعليمات ربط خدمة (github, gdrive, slack…) |\n"
+            "| `/disconnect <خدمة>` | فصل خدمة |\n\n"
+            "### 💬 المحادثة والذاكرة\n"
+            "| الأمر | الوظيفة |\n|---|---|\n"
+            "| `/history` | المحادثات السابقة |\n"
+            "| `/load <id>` | استعادة محادثة |\n"
+            "| `/new` | محادثة جديدة |\n"
+            "| `/export` | تصدير المحادثة |\n"
+            "| `أكمل` | متابعة المهمة المتوقّفة |\n\n"
+            "### 🎙️ الصوت\n"
+            "| الأمر | الوظيفة |\n|---|---|\n"
+            "| `/voice on` / `off` | تفعيل/تعطيل الرد الصوتي |\n"
+            "| `/voice <اسم>` | تغيير الصوت (salma, aria…) |\n\n"
+            "### 🧩 أخرى\n"
+            "| الأمر | الوظيفة |\n|---|---|\n"
+            "| `/plugins` | الإضافات |\n"
+            "| `/tasks` | سجل المهام |\n"
+            "| `/screenshot` | لقطة شاشة |\n\n"
+            "---\n"
+            "### 💡 أمثلة طلبات (اكتبها مباشرة)\n"
+            "- «اعرض مشاريعي على Railway» · «حلّل EUR/USD» · «كم سعر البيتكوين؟»\n"
+            "- «ابنِ تطبيق آلة حاسبة وحوّله exe» · «أنشئ تقرير Excel ونسّقه»\n"
+            "- «ابحث عن [موضوع] واكتب دراسة Word على سطح المكتب»\n"
+            "- «ابحث في تيليجرام عن ملف [...] وحمّله» · «أرسل لي إشعار على Discord»\n\n"
+            "_ملاحظة: البطاقات في شاشة المحادثة الجديدة تشغّل هذه الأوامر بنقرة._"
+        )).send()
+        return
 
     # ── Model switch command ──────────────────────────────────────────────────
     if user_text.lower().startswith("/model"):
