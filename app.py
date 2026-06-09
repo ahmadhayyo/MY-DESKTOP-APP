@@ -985,6 +985,56 @@ async def _run_scheduled_job(job: dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Persistent commands sidebar — always-visible, organized command reference
+# ─────────────────────────────────────────────────────────────────────────────
+_COMMANDS_SIDEBAR_MD = (
+    "## 🔄 النموذج والإعدادات\n"
+    "- `/model` — عرض/تغيير النموذج\n"
+    "- `/model groq` · `deepseek` · `google`\n"
+    "  · `openai` · `anthropic` · `ollama`\n"
+    "- `/settings` — الإعدادات\n\n"
+    "## 🔌 التكاملات\n"
+    "- `/integrations` — مركز التكاملات\n"
+    "- `/connect <خدمة>` — ربط خدمة\n"
+    "- `/disconnect <خدمة>` — فصل خدمة\n\n"
+    "## 💬 المحادثة والذاكرة\n"
+    "- `/history` — المحادثات السابقة\n"
+    "- `/load <id>` — استعادة محادثة\n"
+    "- `/new` — محادثة جديدة\n"
+    "- `/export` — تصدير المحادثة\n"
+    "- `أكمل` — متابعة مهمة متوقّفة\n\n"
+    "## 🎙️ الصوت\n"
+    "- `/voice on` / `off`\n"
+    "- `/voice <اسم>` — salma, aria…\n\n"
+    "## 🧩 أخرى\n"
+    "- `/plugins` — الإضافات\n"
+    "- `/tasks` — سجل المهام\n"
+    "- `/screenshot` — لقطة شاشة\n"
+    "- `/help` — هذا الدليل كرسالة\n\n"
+    "---\n"
+    "### 💡 أمثلة طلبات\n"
+    "- اعرض مشاريعي على Railway\n"
+    "- حلّل EUR/USD · كم سعر البيتكوين؟\n"
+    "- ابنِ تطبيق آلة حاسبة وحوّله exe\n"
+    "- أنشئ تقرير Excel ونسّقه\n"
+    "- ابحث عن [موضوع] واكتب دراسة Word\n"
+    "- ابحث في تيليجرام عن [ملف] وحمّله\n"
+    "- أرسل لي إشعاراً على Discord\n"
+)
+
+
+async def _show_commands_sidebar() -> None:
+    """Pin an always-visible, organized command reference to the side panel."""
+    try:
+        await cl.ElementSidebar.set_title("📋 أوامر HAYO")
+        await cl.ElementSidebar.set_elements(
+            [cl.Text(name="الأوامر", content=_COMMANDS_SIDEBAR_MD)]
+        )
+    except Exception as exc:
+        _logger.warning("Could not set commands sidebar: %s", exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Starters — clickable command cards on the welcome screen
 # ─────────────────────────────────────────────────────────────────────────────
 @cl.set_starters
@@ -1065,6 +1115,9 @@ async def on_chat_start() -> None:
                 switch_provider(saved_provider)
     except Exception as _exc:
         _logger.warning("Could not apply saved provider '%s': %s", saved_provider, _exc)
+
+    # Pin the always-visible commands reference to the side panel (fresh + resumed).
+    await _show_commands_sidebar()
 
     # Build available models list for display
     available_models = []
@@ -1184,6 +1237,9 @@ async def on_chat_resume(thread: dict) -> None:
     saved_provider = last_session.get("provider", _PROVIDER)
     cl.user_session.set("current_provider", saved_provider)
     _save_session(thread_id, saved_provider)
+
+    # Keep the commands reference pinned on resume too.
+    await _show_commands_sidebar()
 
     thread_name = thread.get("name", "")
     await cl.Message(
