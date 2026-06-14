@@ -1497,12 +1497,13 @@ def worker_node(state: AgentState) -> dict:
         "  scroll_in_window(window_title='...', direction='up'/'down')\n"
     )
 
-    # Groq free tier has a tight 12K TPM limit — use compact prompt only.
-    # DeepSeek, Claude, Gemini, GPT-4, and Ollama get the full guide.
-    if _PROVIDER == "groq":
-        worker_prompt = _core_rules          # ~4K tokens — fits within Groq free limit
-    else:
-        worker_prompt = _core_rules + _extended_tool_guide
+    # EQUAL CAPABILITY ACROSS ALL MODELS: every provider gets the SAME full guide
+    # and the SAME bound tool set (capped at 126 in _build_tools_binding). No model
+    # is shortchanged. Token cost is kept in check by the 126-tool cap; Groq's
+    # per-minute throttling is absorbed by the 429 retry/backoff in _safe_llm_invoke.
+    # (Ollama, with a small context, still gets a trimmed tool list — but the same
+    #  guidance — via _select_tools_for_ollama.)
+    worker_prompt = _core_rules + _extended_tool_guide
 
     system = SystemMessage(content=worker_prompt)
 
