@@ -592,6 +592,10 @@ async def _run_graph(input_or_command, config: dict) -> None:
                 "10061", "connection refused", "actively refused",
                 "connect error", "تعذّر الاتصال", "ollama"))
         )
+        _is_auth = any(k in _exc_str for k in (
+            "خطأ في المصادقة", "authentication", "401", "unauthorized",
+            "invalid api key", "invalid_api_key", "403", "forbidden",
+        ))
         # GraphRecursionError = LangGraph step ceiling. With recursion_limit now
         # set well above 2*MAX_ITERATIONS this should be rare, but if a task is
         # genuinely huge, tell the user how to continue instead of a raw trace.
@@ -603,9 +607,10 @@ async def _run_graph(input_or_command, config: dict) -> None:
                     "_(لرفع الحد دائماً: `/settings set MAX_ITERATIONS 200`)_"
                 )
             ).send()
+        elif _is_auth:
+            cl.user_session.set("_llm_unreachable", True)
+            await cl.Message(content=str(exc)).send()
         elif _is_conn:
-            # LLM/provider unreachable — show ONCE and flag so the autonomous loop
-            # does NOT keep retrying (the cause of the repeated error spam).
             cl.user_session.set("_llm_unreachable", True)
             await cl.Message(
                 content=(
@@ -1134,24 +1139,27 @@ async def on_chat_start() -> None:
     last_thread = last_session.get("thread_id")
     saved_provider = last_session.get("provider", _PROVIDER)
 
+    # Check if the old thread has resumable work (for the hint message only).
+    has_work = False
     if last_thread:
         try:
             state = await GRAPH.aget_state({"configurable": {"thread_id": last_thread}})
             has_work = bool(state and state.values.get("messages"))
         except Exception:
-            has_work = False
-    else:
-        has_work = False
+            pass
 
+    # ALWAYS start a fresh graph thread — old state must never bleed into a
+    # new conversation. The old thread is only used when the user explicitly
+    # types "أكمل" / "continue", which loads it on demand in on_message.
+    thread_id = str(uuid.uuid4())
+    resume_note = ""
     if has_work and last_thread:
-        thread_id = last_thread
+        # Store the old thread so "أكمل" can find it, but don't use it now.
+        cl.user_session.set("_resumable_thread_id", last_thread)
         resume_note = (
-            "\n\n> 🔁 **تم استعادة الجلسة السابقة.** "
-            "اكتب **أكمل** أو **continue** لاستئناف مهمتك الأخيرة.\n"
+            "\n\n> 🔁 **لديك مهمة سابقة غير مكتملة.** "
+            "اكتب **أكمل** أو **continue** لاستئنافها.\n"
         )
-    else:
-        thread_id = str(uuid.uuid4())
-        resume_note = ""
 
     cl.user_session.set("thread_id", thread_id)
     cl.user_session.set("current_provider", saved_provider)
@@ -1799,37 +1807,49 @@ async def on_message(message: cl.Message) -> None:
 
     # ── Continue / Resume detection ───────────────────────────────────────────
     if _is_continue_request(user_text):
-        try:
-            state = await GRAPH.aget_state(config)
-            if state and state.next:
-                await cl.Message(content="▶️ جارٍ الاستئناف من حيث توقفت…").send()
-                await _run_graph(Command(resume="continue"), config)
-                await _handle_hitl_loop(config)
-                await _auto_continue_until_done(config)
-                return
-            elif state and state.values.get("plan") and state.values.get("iteration_count", 0) > 0:  # noqa: E501
-                await cl.Message(content="🔁 جارٍ متابعة المهمة السابقة…").send()
-                inputs = {
-                    "messages": [
-                        HumanMessage(
-                            content="Continue working on the task. Pick up from the last completed step and keep going until fully done."
-                        )
-                    ]
-                }
-                await _run_graph(inputs, config)
-                await _handle_hitl_loop(config)
-                await _auto_continue_until_done(config)
-                return
-        except Exception:
-            pass
+        # First try the current thread, then fall back to the resumable thread
+        # saved at on_chat_start (the old session's thread).
+        _resume_candidates = [thread_id]
+        _old_tid = cl.user_session.get("_resumable_thread_id")
+        if _old_tid and _old_tid != thread_id:
+            _resume_candidates.append(_old_tid)
 
-    # ── Keep the same thread_id across messages ───────────────────────────────
-    # PREVIOUSLY we generated a fresh thread_id per message, which made the
-    # agent forget everything between messages. Now we reuse the session's
-    # thread_id so the LangGraph state (and full conversation history) carries
-    # over. Task boundaries are signalled by the cancel_marker in planner_node,
-    # which tells the reviewer to evaluate only the new plan.
-    # `thread_id` and `config` are already set above from cl.user_session.
+        for _try_tid in _resume_candidates:
+            try:
+                _try_cfg = {"configurable": {"thread_id": _try_tid}, "recursion_limit": _recursion_limit}
+                state = await GRAPH.aget_state(_try_cfg)
+                if state and state.next:
+                    # Switch to this thread for the rest of the session
+                    cl.user_session.set("thread_id", _try_tid)
+                    thread_id = _try_tid
+                    config = _try_cfg
+                    _save_session(_try_tid, cl.user_session.get("current_provider", _PROVIDER))
+                    await cl.Message(content="▶️ جارٍ الاستئناف من حيث توقفت…").send()
+                    await _run_graph(Command(resume="continue"), config)
+                    await _handle_hitl_loop(config)
+                    await _auto_continue_until_done(config)
+                    return
+                elif state and state.values.get("plan") and state.values.get("iteration_count", 0) > 0:
+                    cl.user_session.set("thread_id", _try_tid)
+                    thread_id = _try_tid
+                    config = _try_cfg
+                    _save_session(_try_tid, cl.user_session.get("current_provider", _PROVIDER))
+                    await cl.Message(content="🔁 جارٍ متابعة المهمة السابقة…").send()
+                    inputs = {
+                        "messages": [
+                            HumanMessage(
+                                content="Continue working on the task. Pick up from the last completed step and keep going until fully done."
+                            )
+                        ]
+                    }
+                    await _run_graph(inputs, config)
+                    await _handle_hitl_loop(config)
+                    await _auto_continue_until_done(config)
+                    return
+            except Exception:
+                continue
+
+    # ── Save session state ─────────────────────────────────────────────────────
     _save_session(thread_id, cl.user_session.get("current_provider", _PROVIDER))
 
     # ── File upload processing ────────────────────────────────────────────────
@@ -1873,30 +1893,30 @@ async def on_message(message: cl.Message) -> None:
     else:
         msg_content = full_text
 
-    # ── Abandon any stale pending interrupt from a previous task ──────────────
-    # If the last task left a HITL interrupt pending (e.g. a CAPTCHA prompt the
-    # user dismissed) and the user is now starting a NEW task (continue/resume
-    # requests already returned above), reusing the same graph thread would make
-    # LangGraph RESUME the old interrupt — so every new command looks "stuck" on
-    # the previous task. Switch to a fresh graph thread so the new task starts
-    # clean. (Chainlit UI history stays visible; only the stuck graph state is
-    # dropped — which is exactly what the user wants for a different task.)
+    # ── Fresh graph thread for every new task ───────────────────────────────
+    # "continue" / "أكمل" requests already returned above using the old thread.
+    # Everything that reaches here is a NEW task — always start a fresh graph
+    # thread so old state (plan, iteration_count, messages) cannot bleed in.
+    # The Chainlit UI chat history stays visible; only the LangGraph checkpoint
+    # is isolated so the planner sees only the new message.
     try:
         _pending = await GRAPH.aget_state(config)
-        if _pending and _pending.next:
-            _fresh_tid = str(uuid.uuid4())
-            cl.user_session.set("thread_id", _fresh_tid)
-            thread_id = _fresh_tid
-            config = {
-                "configurable": {"thread_id": _fresh_tid},
-                "recursion_limit": _recursion_limit,
-            }
-            _save_session(_fresh_tid, cl.user_session.get("current_provider", _PROVIDER))
-            await cl.Message(
-                content="🆕 بدأت مهمة جديدة — أُلغيت المهمة المعلّقة السابقة."
-            ).send()
+        _has_old_state = _pending and (
+            _pending.next  # HITL interrupt pending
+            or _pending.values.get("messages")  # completed/in-progress task
+        )
     except Exception:
-        pass
+        _has_old_state = False
+
+    if _has_old_state:
+        _fresh_tid = str(uuid.uuid4())
+        cl.user_session.set("thread_id", _fresh_tid)
+        thread_id = _fresh_tid
+        config = {
+            "configurable": {"thread_id": _fresh_tid},
+            "recursion_limit": _recursion_limit,
+        }
+        _save_session(_fresh_tid, cl.user_session.get("current_provider", _PROVIDER))
 
     # ── Initial graph run (with task tracking + desktop notifications) ────────
     import time as _time

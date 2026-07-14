@@ -720,6 +720,36 @@ def _safe_llm_invoke(llm, messages: list[BaseMessage], *, label: str = "LLM") ->
                     "استخدم gemini-2.5-flash أو Groq."
                 )
 
+            # ── Auth errors (HTTP 401/403) — fail immediately, no retry ────
+            is_auth_err = any(kw in err_str for kw in (
+                "401", "authentication", "unauthorized", "invalid api key",
+                "invalid_api_key", "403", "forbidden", "permission denied",
+                "insufficient_quota", "billing",
+            ))
+            if is_auth_err:
+                logger.error("[%s] Authentication/authorization error — stopping: %s", label, err)
+                raise RuntimeError(
+                    f"🔑 **خطأ في المصادقة مع {_PROVIDER}:**\n\n"
+                    f"`{type(err).__name__}: {err}`\n\n"
+                    "الحلول:\n"
+                    "1. تأكد أن مفتاح API صحيح وفعّال في ملف `.env`\n"
+                    "2. تأكد أن الرصيد كافٍ على حسابك\n"
+                    "3. أو بدّل النموذج: `/model groq` أو `/model ollama`"
+                ) from err
+
+            # ── API validation errors (HTTP 400) — fail immediately ───────
+            is_api_err = "400" in err_str and any(kw in err_str for kw in (
+                "maximum number of items", "too many tools", "invalid_request",
+                "maximum context length", "content length",
+            ))
+            if is_api_err:
+                logger.error("[%s] API validation error — stopping: %s", label, err)
+                raise RuntimeError(
+                    f"⚠️ **خطأ من API المزوّد ({_PROVIDER}):**\n\n"
+                    f"`{err}`\n\n"
+                    "هذا خطأ في تهيئة الطلب — أعد تشغيل التطبيق أو بدّل النموذج: `/model groq`"
+                ) from err
+
             is_connection_err = any(kw in err_str for kw in (
                 "connection refused", "timed out", "timeout",
                 "connect error", "unreachable", "connection reset",
