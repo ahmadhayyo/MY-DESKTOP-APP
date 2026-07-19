@@ -23,8 +23,22 @@ MAX_READ_BYTES = 200_000  # ~200KB per read tool call
 
 
 def _resolve_path(p: str) -> Path:
-    """Expand ~, env vars, and resolve to absolute Path."""
+    """Expand ~, env vars, and resolve to absolute Path.
+
+    Relative paths resolve against the active workspace (the user's project
+    folder) when one is set — so read_file('main.py') means
+    '<workspace>/main.py', NOT '<app-dir>/main.py'. Absolute paths and
+    ~-paths are unaffected.
+    """
     expanded = os.path.expandvars(os.path.expanduser(p))
+    if not os.path.isabs(expanded):
+        try:
+            from core.workspace_state import get_workspace
+            ws = get_workspace()
+            if ws:
+                return Path(os.path.join(ws, expanded)).resolve()
+        except Exception:
+            pass
     return Path(expanded).resolve()
 
 

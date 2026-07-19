@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import uuid
 from pathlib import Path
 
@@ -177,6 +178,12 @@ def _save_session(thread_id: str, provider: str | None = None) -> None:
         data = {"thread_id": thread_id}
         if provider:
             data["provider"] = provider
+        try:
+            ws = cl.user_session.get("workspace", "")
+            if ws:
+                data["workspace"] = ws
+        except Exception:
+            pass
         with open(_SESSION_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f)
     except Exception:
@@ -237,6 +244,8 @@ _INTERNAL_MARKERS = (
     "Completed:  ",          # progress_note field (two spaces after colon)
     "⏭️ SKIPPED:",
     "REPLAN:",
+    # Workspace marker (injected by UI picker — model sees it, user does not)
+    "[WORKSPACE:",
     # DeepSeek DSML tags
     "<｜｜DSML｜｜",
     "</｜｜DSML｜｜",
@@ -445,15 +454,25 @@ async def _run_graph(input_or_command, config: dict) -> None:
                 else:
                     _line_buf.clear()
 
-                # Leaving planner → build collapsible plan step
-                if current_node == "planner" and not is_conversational:
-                    full = "".join(planner_buf)
-                    plan_steps = _parse_plan_steps(full)
-                    if active_step and plan_steps:
-                        plan_content = "**📋 الخطوات المخططة:**"
-                        for i, s in enumerate(plan_steps, 1):
-                            plan_content += f"\n{i}. {_clean_plan_label(s)}"
-                        active_step.output = plan_content
+                # Leaving planner → handle conversational vs task
+                if current_node == "planner":
+                    if is_conversational:
+                        # Push ALL planner text to the main response bubble.
+                        # Earlier chunks may have gone to active_step before
+                        # CONVERSATIONAL_ONLY was detected — replay them now.
+                        full_text = "".join(planner_buf)
+                        clean = _filter_internal_tokens(full_text).strip()
+                        if clean and not final_text_buf:
+                            await response_msg.stream_token(clean)
+                            final_text_buf.append(clean)
+                    else:
+                        full = "".join(planner_buf)
+                        plan_steps = _parse_plan_steps(full)
+                        if active_step and plan_steps:
+                            plan_content = "**📋 الخطوات المخططة:**"
+                            for i, s in enumerate(plan_steps, 1):
+                                plan_content += f"\n{i}. {_clean_plan_label(s)}"
+                            active_step.output = plan_content
 
                 # Leaving worker → close its sub-step
                 if current_node == "worker":
@@ -513,6 +532,14 @@ async def _run_graph(input_or_command, config: dict) -> None:
                 if text:
                     _line_buf.append(text)
                     accumulated = "".join(_line_buf)
+
+                    # Detect CONVERSATIONAL_ONLY as early as possible — even
+                    # before a newline arrives. DeepSeek often puts it on the
+                    # last line with no trailing \n, so the old newline-gated
+                    # check never fires.
+                    if node == "planner" and not is_conversational and "CONVERSATIONAL_ONLY" in accumulated:
+                        is_conversational = True
+
                     # Process complete lines only (token-level safety)
                     if "\n" in accumulated:
                         complete, remainder = accumulated.rsplit("\n", 1)
@@ -523,8 +550,6 @@ async def _run_graph(input_or_command, config: dict) -> None:
                         if filtered.strip():
                             if node == "planner":
                                 planner_buf.append(filtered)
-                                if "CONVERSATIONAL_ONLY" in complete:
-                                    is_conversational = True
                                 if is_conversational:
                                     # Conversational: goes straight to main bubble
                                     await response_msg.stream_token(filtered)
@@ -672,6 +697,18 @@ async def _run_graph(input_or_command, config: dict) -> None:
 
         await _close_worker_step()
         await _close_active_step()
+
+        # ── Conversational replay (final safety net) ─────────────────────────
+        # Worker/reviewer are pass-through for CONVERSATIONAL_ONLY (no LLM
+        # call → no streaming chunks → no node transition detected).  The
+        # in-loop replay at the planner→worker transition therefore never
+        # fires, leaving the greeting trapped in planner_buf.  Push it to
+        # the main bubble now so the user actually sees the response.
+        if is_conversational and not final_text_buf and planner_buf:
+            _greeting = _filter_internal_tokens("".join(planner_buf)).strip()
+            if _greeting:
+                response_msg.content = _greeting
+                final_text_buf.append(_greeting)
 
         # ── Place the final report at the BOTTOM of the chat ──────────────────
         # The top bubble (response_msg) holds the collapsible steps. Streaming the
@@ -1037,6 +1074,10 @@ _COMMANDS_SIDEBAR_MD = (
     "## 🎙️ الصوت\n"
     "- `/voice on` / `off`\n"
     "- `/voice <اسم>` — salma, aria…\n\n"
+    "## 📂 مجلد العمل\n"
+    "- `/workspace` — اختيار مجلد عبر نافذة النظام\n"
+    "- `/workspace <مسار>` — تعيين مجلد مباشرة\n"
+    "- أو اضغط زر **📁 مجلد العمل**\n\n"
     "## 🧩 أخرى\n"
     "- `/plugins` — الإضافات\n"
     "- `/tasks` — سجل المهام\n"
@@ -1057,9 +1098,18 @@ _COMMANDS_SIDEBAR_MD = (
 async def _show_commands_sidebar() -> None:
     """Pin an always-visible, organized command reference to the side panel."""
     try:
+        workspace = ""
+        try:
+            workspace = cl.user_session.get("workspace", "")
+        except Exception:
+            pass
+        ws_header = (
+            f"## 📂 مجلد العمل الحالي\n`{workspace}`\n\n---\n\n"
+            if workspace else ""
+        )
         await cl.ElementSidebar.set_title("📋 أوامر HAYO")
         await cl.ElementSidebar.set_elements(
-            [cl.Text(name="الأوامر", content=_COMMANDS_SIDEBAR_MD)]
+            [cl.Text(name="الأوامر", content=ws_header + _COMMANDS_SIDEBAR_MD)]
         )
     except Exception as exc:
         _logger.warning("Could not set commands sidebar: %s", exc)
@@ -1075,10 +1125,14 @@ def _quick_actions() -> list:
         ("📊 تقرير Excel", "أنشئ تقرير مبيعات Excel من بيانات تجريبية ونسّقه على سطح المكتب"),
         ("🏗️ ابنِ تطبيق", "ابنِ تطبيق آلة حاسبة بواجهة رسومية وحوّله إلى exe على سطح المكتب"),
     ]
-    return [
+    actions = [
+        cl.Action(name="pick_workspace", label="📁 مجلد العمل", payload={}),
+    ]
+    actions.extend(
         cl.Action(name="run_cmd", label=label, payload={"cmd": cmd})
         for label, cmd in items
-    ]
+    )
+    return actions
 
 
 @cl.action_callback("run_cmd")
@@ -1094,6 +1148,66 @@ async def _on_quick_action(action: cl.Action):
     await on_message(cl.Message(content=cmd))
 
 
+# ── Workspace folder picker ─────────────────────────────────────────────────
+async def _pick_workspace_folder() -> str | None:
+    """Open a native Windows folder picker dialog and return the selected path."""
+    def _pick_sync():
+        try:
+            result = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command",
+                 "Add-Type -AssemblyName System.Windows.Forms; "
+                 "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                 "$d.Description = 'Select Working Folder'; "
+                 "$d.RootFolder = 'Desktop'; "
+                 "if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }"],
+                capture_output=True, text=True, timeout=120,
+            )
+            path = result.stdout.strip()
+            return path if path and os.path.isdir(path) else None
+        except Exception:
+            return None
+    try:
+        return await asyncio.to_thread(_pick_sync)
+    except Exception:
+        return None
+
+
+def _set_workspace(path: str) -> None:
+    """Set the workspace in BOTH the chat session and the process-wide base
+    used by the file/coding tools to resolve relative paths."""
+    cl.user_session.set("workspace", path)
+    try:
+        from core.workspace_state import set_workspace as _core_set_ws
+        _core_set_ws(path)
+    except Exception:
+        pass
+
+
+@cl.action_callback("pick_workspace")
+async def _on_pick_workspace(action: cl.Action):
+    """Open native folder picker and set as working directory."""
+    try:
+        await action.remove()
+    except Exception:
+        pass
+    await cl.Message(content="📂 جارٍ فتح نافذة اختيار المجلد...").send()
+    path = await _pick_workspace_folder()
+    if path:
+        _set_workspace(path)
+        await _show_commands_sidebar()
+        await cl.Message(
+            content=(
+                f"✅ **تم تحديد مجلد العمل:**\n"
+                f"`{path}`\n\n"
+                "جميع العمليات القادمة ستستخدم هذا المجلد تلقائياً."
+            ),
+        ).send()
+    else:
+        await cl.Message(
+            content="⚠️ لم يتم اختيار مجلد. يمكنك أيضاً استخدام `/workspace <مسار>`"
+        ).send()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Starters — clickable command cards on the welcome screen
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1101,6 +1215,7 @@ async def _on_quick_action(action: cl.Action):
 async def set_starters():
     """Ready-made, organized action cards shown on a new chat (click to run)."""
     return [
+        cl.Starter(label="📁 اختر مجلد العمل", message="/workspace"),
         cl.Starter(label="🔌 التكاملات", message="/integrations"),
         cl.Starter(label="🔄 تغيير النموذج", message="/model"),
         cl.Starter(label="📋 كل الأوامر", message="/help"),
@@ -1138,6 +1253,13 @@ async def on_chat_start() -> None:
     last_session = _load_last_session()
     last_thread = last_session.get("thread_id")
     saved_provider = last_session.get("provider", _PROVIDER)
+
+    # ── Restore workspace from last session ────────────────────────────
+    saved_workspace = last_session.get("workspace", "")
+    if saved_workspace and os.path.isdir(saved_workspace):
+        _set_workspace(saved_workspace)
+    else:
+        _set_workspace("")
 
     # Check if the old thread has resumable work (for the hint message only).
     has_work = False
@@ -1439,6 +1561,10 @@ async def on_message(message: cl.Message) -> None:
             "| `/integrations` | مركز التكاملات وحالتها |\n"
             "| `/connect <خدمة>` | تعليمات ربط خدمة (github, gdrive, slack…) |\n"
             "| `/disconnect <خدمة>` | فصل خدمة |\n\n"
+            "### 📂 مجلد العمل\n"
+            "| الأمر | الوظيفة |\n|---|---|\n"
+            "| `/workspace` | اختيار مجلد عبر نافذة النظام |\n"
+            "| `/workspace <مسار>` | تعيين مجلد مباشرة |\n\n"
             "### 💬 المحادثة والذاكرة\n"
             "| الأمر | الوظيفة |\n|---|---|\n"
             "| `/history` | المحادثات السابقة |\n"
@@ -1590,6 +1716,45 @@ async def on_message(message: cl.Message) -> None:
         await cl.Message(
             content=f"🆕 **محادثة جديدة بدأت** — `{new_thread_id[:8]}…`"
         ).send()
+        return
+
+    # ── Workspace picker command ─────────────────────────────────────────────
+    if user_text.lower().startswith("/workspace"):
+        parts = user_text.split(maxsplit=1)
+        if len(parts) == 2:
+            ws_path = parts[1].strip().strip('"').strip("'")
+            if os.path.isdir(ws_path):
+                _set_workspace(ws_path)
+                await _show_commands_sidebar()
+                await cl.Message(
+                    content=(
+                        f"✅ **تم تحديد مجلد العمل:**\n`{ws_path}`\n\n"
+                        "جميع العمليات القادمة ستستخدم هذا المجلد تلقائياً."
+                    ),
+                ).send()
+            else:
+                await cl.Message(content=f"❌ المسار غير موجود: `{ws_path}`").send()
+        else:
+            path = await _pick_workspace_folder()
+            if path:
+                _set_workspace(path)
+                await _show_commands_sidebar()
+                await cl.Message(
+                    content=(
+                        f"✅ **تم تحديد مجلد العمل:**\n`{path}`\n\n"
+                        "جميع العمليات القادمة ستستخدم هذا المجلد تلقائياً."
+                    ),
+                ).send()
+            else:
+                current_ws = cl.user_session.get("workspace", "")
+                if current_ws:
+                    await cl.Message(
+                        content=f"📂 **مجلد العمل الحالي:** `{current_ws}`\n\nللتغيير: `/workspace <مسار>` أو `/workspace` لفتح نافذة الاختيار"
+                    ).send()
+                else:
+                    await cl.Message(
+                        content="📂 لم يتم تحديد مجلد عمل بعد.\n\nاستخدم `/workspace <مسار>` أو `/workspace` لفتح نافذة الاختيار."
+                    ).send()
         return
 
     # ── Voice mode command ────────────────────────────────────────────────────
@@ -1885,7 +2050,25 @@ async def on_message(message: cl.Message) -> None:
                     except Exception as exc:
                         file_context += f"\n\n❌ تعذرت قراءة '{name}': {exc}"
 
-    full_text = user_text + file_context
+    # If the user TYPED an explicit folder path in this message, adopt it as the
+    # new workspace — a freshly-typed path overrides any earlier picker choice,
+    # so the agent never "jumps" back to a stale folder on the next message.
+    _typed_dir = ""
+    for _m in re.findall(
+        r'[A-Za-z]:[/\\](?:[^\s"\'<>|*?,;)]+[/\\])*[^\s"\'<>|*?,;)]*', user_text
+    ):
+        _cand = _m.rstrip("/\\").strip('"').strip("'")
+        if _cand and os.path.splitext(_cand)[1]:
+            _cand = os.path.dirname(_cand)
+        if _cand and os.path.isdir(_cand):
+            _typed_dir = _cand
+    if _typed_dir and _typed_dir != cl.user_session.get("workspace", ""):
+        _set_workspace(_typed_dir)
+
+    # Inject workspace context so the agent always knows the working directory
+    _ws = cl.user_session.get("workspace", "")
+    _ws_prefix = f"[WORKSPACE: {_ws}]\n" if _ws else ""
+    full_text = _ws_prefix + user_text + file_context
 
     # Build message content — multimodal if images are attached
     if image_parts:

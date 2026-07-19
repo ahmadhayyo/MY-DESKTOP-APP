@@ -137,6 +137,17 @@ def _load_network():
 _import_category("network", _load_network)
 
 # ═══════════════════════════════════════════════════════════
+# API KEY & ENDPOINT VERIFICATION
+# ═══════════════════════════════════════════════════════════
+def _load_api_keys():
+    from tools.api_key_tools import (
+        test_api_key, test_env_api_keys, test_endpoint,
+    )
+    return [test_api_key, test_env_api_keys, test_endpoint]
+
+_import_category("api_keys", _load_api_keys)
+
+# ═══════════════════════════════════════════════════════════
 # AUDIO & NOTIFICATIONS
 # ═══════════════════════════════════════════════════════════
 def _load_audio():
@@ -332,9 +343,9 @@ _import_category("testing", _load_testing)
 # ═══════════════════════════════════════════════════════════
 def _load_coding():
     from tools.coding_tools import (
-        create_project, run_python, run_script, edit_file_lines,
+        create_project, run_python, run_script, edit_file_lines, edit_file_replace,
     )
-    return [create_project, run_python, run_script, edit_file_lines]
+    return [create_project, run_python, run_script, edit_file_lines, edit_file_replace]
 
 _import_category("coding", _load_coding)
 

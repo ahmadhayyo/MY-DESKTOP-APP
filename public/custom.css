@@ -1,0 +1,78 @@
+/* HAYO AI Agent — Custom UI Styles */
+
+/* ── Scrollbar polish ──────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.25); }
+
+/* ── Code blocks — better readability ────────────────────── */
+pre { border-radius: 8px !important; }
+code { font-size: 13px !important; font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace !important; }
+
+/* ── Inline code — subtle background ─────────────────────── */
+p code, li code, td code {
+    background: rgba(255, 255, 255, 0.06) !important;
+    padding: 2px 6px !important;
+    border-radius: 4px !important;
+    font-size: 0.9em !important;
+}
+
+/* ── Message bubble spacing ──────────────────────────────── */
+.cl-message {
+    margin-bottom: 4px;
+}
+
+/* ── Step/tool output — tighter & cleaner ────────────────── */
+[data-testid="step"] {
+    border-left: 2px solid rgba(99, 102, 241, 0.4);
+    padding-left: 12px;
+    margin-left: 4px;
+}
+
+/* ── Action buttons — more polished ──────────────────────── */
+.cl-action-button {
+    border-radius: 20px !important;
+    text-transform: none !important;
+    font-weight: 500 !important;
+}
+
+/* ── Starter cards — subtle glow on hover ────────────────── */
+.cl-starter:hover {
+    transform: translateY(-2px);
+    transition: transform 0.15s ease;
+}
+
+/* ── Sidebar — workspace path styling ────────────────────── */
+.cl-sidebar code {
+    color: #93c5fd;
+    background: rgba(99, 102, 241, 0.1);
+    padding: 2px 6px;
+    border-radius: 4px;
+    word-break: break-all;
+}
+
+/* ── Tables — cleaner borders ────────────────────────────── */
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 8px 0;
+}
+th, td {
+    padding: 8px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    text-align: right;
+}
+th {
+    background: rgba(255, 255, 255, 0.05);
+    font-weight: 600;
+}
+
+/* ── Better focus ring ───────────────────────────────────── */
+*:focus-visible {
+    outline: 2px solid rgba(99, 102, 241, 0.5);
+    outline-offset: 2px;
+}

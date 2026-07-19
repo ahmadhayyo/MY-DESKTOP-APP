@@ -19,8 +19,21 @@ from config import DESKTOP_DIR
 
 
 def _resolve_path(p: str) -> Path:
-    """Expand ~, env vars, and resolve to absolute Path."""
+    """Expand ~, env vars, and resolve to absolute Path.
+
+    Relative paths resolve against the active workspace (the user's project
+    folder) when one is set — so run_script('main.py') means
+    '<workspace>/main.py', NOT '<app-dir>/main.py'.
+    """
     expanded = os.path.expandvars(os.path.expanduser(p))
+    if not os.path.isabs(expanded):
+        try:
+            from core.workspace_state import get_workspace
+            ws = get_workspace()
+            if ws:
+                return Path(os.path.join(ws, expanded)).resolve()
+        except Exception:
+            pass
     return Path(expanded).resolve()
 
 
@@ -63,7 +76,14 @@ def create_project(
 
     project_dir = parent / name
     if project_dir.exists():
-        return f"[ERROR] Folder already exists: {project_dir}"
+        return (
+            f"[ERROR] Project already exists: {project_dir}\n"
+            f"This project is ALREADY THERE — do NOT create it again.\n"
+            f"To work on it, use these tools instead:\n"
+            f"  • list_dir(path='{project_dir}')        → see its files\n"
+            f"  • read_file(path='{project_dir}/<file>') → read the code\n"
+            f"  • edit_file_replace(path=..., old_text=..., new_text=...) → fix it"
+        )
 
     tmpl = _TEMPLATES.get(template, _TEMPLATES["empty"])
 
@@ -92,15 +112,30 @@ def create_project(
 def run_python(
     code: Annotated[str, "Python code to execute."],
     timeout: Annotated[int, "Max execution time in seconds. Default 30."] = 30,
+    cwd: Annotated[str, "Working directory for execution. Pass the workspace path here. Default: Desktop."] = "",
 ) -> str:
-    """Run Python code and return the output. Useful for calculations, data processing, testing."""
+    """Run Python code and return the output. Useful for calculations, data processing, testing.
+
+    When working on a project, pass cwd=<workspace path> so imports and file paths
+    resolve relative to the project directory instead of the Desktop.
+    """
+    if cwd.strip():
+        work_dir = _resolve_path(cwd)
+    else:
+        # Default to the active workspace if set, else Desktop.
+        try:
+            from core.workspace_state import get_workspace
+            _ws = get_workspace()
+        except Exception:
+            _ws = ""
+        work_dir = Path(_ws) if _ws else DESKTOP_DIR
     try:
         result = subprocess.run(
             [sys.executable, "-c", code],
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=str(DESKTOP_DIR),
+            cwd=str(work_dir),
         )
         output = result.stdout.strip()
         if result.stderr.strip():
@@ -117,10 +152,15 @@ def run_python(
 @tool
 def run_script(
     path: Annotated[str, "Path to the script file to run."],
-    args: Annotated[str, "Command-line arguments (space-separated). Default empty."] = "",
+    script_args: Annotated[str, "Command-line arguments (space-separated). Default empty."] = "",
     timeout: Annotated[int, "Max execution time in seconds. Default 60."] = 60,
 ) -> str:
-    """Run a script file (Python, Node.js, batch, PowerShell) and return output."""
+    """Run a script file (Python, Node.js, batch, PowerShell) and return output.
+
+    Use this to TEST code after editing it — it reports stdout, stderr and exit code.
+    """
+    # NOTE: the parameter is `script_args`, never `args` — pydantic/langchain mangle
+    # a field named `args` into `v__args`, which makes every call raise TypeError.
     target = _resolve_path(path)
     if not target.exists():
         return f"[ERROR] File not found: {target}"
@@ -139,8 +179,8 @@ def run_script(
     else:
         cmd = [str(target)]
 
-    if args:
-        cmd.extend(args.split())
+    if script_args:
+        cmd.extend(script_args.split())
 
     try:
         result = subprocess.run(
@@ -201,6 +241,57 @@ def edit_file_lines(
         return (
             f"[OK] Replaced lines {start_line}-{end_line} ({replaced_count} lines) in {target}\n"
             f"File now has {len(new_lines)} lines."
+        )
+    except Exception as exc:
+        return f"[ERROR] {type(exc).__name__}: {exc}"
+
+
+@tool
+def edit_file_replace(
+    path: Annotated[str, "Path to the file to edit."],
+    old_text: Annotated[str, "The exact existing text to find and replace. Must match exactly."],
+    new_text: Annotated[str, "The text to replace it with. Use empty string to delete."],
+    encoding: Annotated[str, "Text encoding."] = "utf-8",
+) -> str:
+    """Find exact text in a file and replace it. More reliable than line-number editing.
+
+    The old_text must appear EXACTLY once in the file (including whitespace/indentation).
+    Use read_file first to see the exact content, then copy the section you want to change.
+
+    Examples:
+      edit_file_replace(path='app.py', old_text='def old_func():', new_text='def new_func():')
+      edit_file_replace(path='config.json', old_text='"port": 3000', new_text='"port": 8080')
+    """
+    target = _resolve_path(path)
+    if not target.exists():
+        return f"[ERROR] File not found: {target}"
+
+    try:
+        content = target.read_text(encoding=encoding, errors="replace")
+        count = content.count(old_text)
+
+        if count == 0:
+            snippet = old_text[:100].replace('\n', '\\n')
+            return (
+                f"[ERROR] Text not found in {target.name}.\n"
+                f"Searched for: \"{snippet}{'...' if len(old_text) > 100 else ''}\"\n"
+                f"⚠️ MANDATORY NEXT STEP: read_file(path='{target}') — read the ACTUAL content,\n"
+                f"then copy old_text EXACTLY from the output (same whitespace/indentation)."
+            )
+        if count > 1:
+            return (
+                f"[ERROR] Found {count} matches — must be unique.\n"
+                f"Include more surrounding context in old_text to make it unique."
+            )
+
+        new_content = content.replace(old_text, new_text, 1)
+        target.write_text(new_content, encoding=encoding)
+
+        old_lines = old_text.count('\n') + 1
+        new_lines = new_text.count('\n') + 1
+        return (
+            f"[OK] Replaced {old_lines} line(s) with {new_lines} line(s) in {target.name}\n"
+            f"File size: {len(new_content)} chars."
         )
     except Exception as exc:
         return f"[ERROR] {type(exc).__name__}: {exc}"
