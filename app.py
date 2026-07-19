@@ -1228,6 +1228,75 @@ _FEATURE_ITEMS: list[tuple[str, str]] = [
 ]
 
 
+# ── Instant actions: run immediately, WITHOUT the AI model (fast + free) ─────
+def _build_system_dashboard() -> str:
+    """Live system snapshot rendered directly (no LLM). CPU/RAM/disk/top procs."""
+    import platform, shutil
+    try:
+        import psutil
+    except Exception:
+        return "⚠️ psutil غير مثبّت — تعذّر بناء لوحة النظام."
+    lines = ["## 🖥️ لوحة النظام (مباشرة)\n"]
+    # CPU + RAM
+    cpu = psutil.cpu_percent(interval=0.4)
+    vm = psutil.virtual_memory()
+    lines.append(f"**المعالج:** {platform.processor() or platform.machine()}")
+    lines.append(f"**الأنوية:** {psutil.cpu_count(logical=False)} فعلية / {psutil.cpu_count()} منطقية · **الحمل:** {cpu:.0f}%")
+    lines.append(f"**الذاكرة:** {vm.used/1024**3:.1f} / {vm.total/1024**3:.1f} GB مستخدمة ({vm.percent:.0f}%) · متاح {vm.available/1024**3:.1f} GB\n")
+    # Disks
+    lines.append("**الأقراص:**")
+    lines.append("| القرص | مستخدم | الكلي | % |")
+    lines.append("|---|---|---|---|")
+    for part in psutil.disk_partitions():
+        try:
+            u = shutil.disk_usage(part.mountpoint)
+            lines.append(f"| {part.device} | {u.used/1024**3:.0f} GB | {u.total/1024**3:.0f} GB | {u.used/u.total*100:.0f}% |")
+        except Exception:
+            continue
+    # Top processes by memory
+    procs = []
+    for p in psutil.process_iter(["name", "memory_info"]):
+        try:
+            procs.append((p.info["name"], p.info["memory_info"].rss))
+        except Exception:
+            continue
+    procs.sort(key=lambda x: x[1], reverse=True)
+    lines.append("\n**أعلى 5 عمليات (ذاكرة):**")
+    for name, rss in procs[:5]:
+        lines.append(f"- `{name}` — {rss/1024**2:.0f} MB")
+    return "\n".join(lines)
+
+
+@cl.action_callback("instant_action")
+async def _on_instant_action(action: cl.Action):
+    """Deterministic buttons that act instantly without invoking the AI model."""
+    what = (action.payload or {}).get("action", "")
+    from config import DESKTOP_DIR, DOWNLOADS_DIR
+    try:
+        if what == "sysinfo":
+            await cl.Message(content=_build_system_dashboard()).send()
+        elif what == "open_desktop":
+            os.startfile(DESKTOP_DIR)  # type: ignore[attr-defined]
+            await cl.Message(content=f"📂 فتحتُ سطح المكتب:\n`{DESKTOP_DIR}`").send()
+        elif what == "open_downloads":
+            os.startfile(DOWNLOADS_DIR)  # type: ignore[attr-defined]
+            await cl.Message(content=f"📥 فتحتُ مجلد التنزيلات:\n`{DOWNLOADS_DIR}`").send()
+        elif what == "show_memory":
+            from core import long_term_memory as _ltm
+            facts = _ltm.all_facts()
+            if not facts:
+                await cl.Message(content="🧠 الذاكرة الدائمة فارغة حالياً.").send()
+            else:
+                lines = [f"## 🧠 الذاكرة الدائمة ({len(facts)} عنصر)\n"]
+                for f in facts[:40]:
+                    lines.append(f"- **({f['category']})** {f['display_key']} = {f['value']}")
+                await cl.Message(content="\n".join(lines)).send()
+        else:
+            await cl.Message(content=f"إجراء غير معروف: `{what}`").send()
+    except Exception as exc:
+        await cl.Message(content=f"❌ تعذّر تنفيذ الإجراء: {exc}").send()
+
+
 def _control_panel_groups() -> list[tuple[str, list]]:
     """Return the control panel as titled groups of action buttons."""
     # 1) Models — one-click switching
@@ -1244,7 +1313,14 @@ def _control_panel_groups() -> list[tuple[str, list]]:
         cl.Action(name="connect_service", label="🔗 Discord", payload={"service": "discord"}),
         cl.Action(name="run_cmd", label="➕ المزيد", payload={"cmd": "/integrations"}),
     ]
-    # 3) Features + workspace — click instead of typing
+    # 3) Instant actions — run immediately, no AI model (fast + free)
+    instant_actions = [
+        cl.Action(name="instant_action", label="🖥️ لوحة النظام", payload={"action": "sysinfo"}),
+        cl.Action(name="instant_action", label="🧠 عرض الذاكرة", payload={"action": "show_memory"}),
+        cl.Action(name="instant_action", label="📂 فتح سطح المكتب", payload={"action": "open_desktop"}),
+        cl.Action(name="instant_action", label="📥 فتح التنزيلات", payload={"action": "open_downloads"}),
+    ]
+    # 4) Features + workspace — click instead of typing
     feature_actions = [cl.Action(name="pick_workspace", label="📁 مجلد العمل", payload={})]
     feature_actions += [
         cl.Action(name="run_cmd", label=label, payload={"cmd": cmd})
@@ -1252,6 +1328,7 @@ def _control_panel_groups() -> list[tuple[str, list]]:
     ]
     return [
         ("🧠 **اختر نموذج الذكاء الاصطناعي** (تبديل بنقرة)", model_actions),
+        ("⚡ **إجراءات فورية** (بلا نموذج — سريعة ومجانية)", instant_actions),
         ("🔗 **التكاملات** (اربط خدماتك)", integration_actions),
         ("🛠️ **الميزات والأدوات** (نفّذ بنقرة)", feature_actions),
     ]
