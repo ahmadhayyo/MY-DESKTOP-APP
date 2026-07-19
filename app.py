@@ -1148,6 +1148,125 @@ async def _on_quick_action(action: cl.Action):
     await on_message(cl.Message(content=cmd))
 
 
+# ── Model / integration key mapping ─────────────────────────────────────────
+_PROVIDER_KEY_VARS = {
+    "google": "GOOGLE_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "ollama": "",  # local, no key
+}
+
+
+async def _apply_model_switch(new_provider: str) -> None:
+    """Switch the active AI provider (shared by the /model command and the
+    one-click model buttons). Verifies the API key, switches, starts a fresh
+    session, and reports the result."""
+    new_provider = (new_provider or "").strip().lower()
+    if new_provider not in _PROVIDERS:
+        available = ", ".join(f"`{k}`" for k in _PROVIDERS.keys())
+        await cl.Message(content=f"❌ نموذج غير معروف: `{new_provider}`\n\nالمتاح: {available}").send()
+        return
+
+    key_var = _PROVIDER_KEY_VARS.get(new_provider, "")
+    api_key = "ollama-local" if new_provider == "ollama" else os.getenv(key_var, "").strip()
+    if not api_key:
+        await cl.Message(content=(
+            f"❌ **مفتاح API غير موجود لـ {_PROVIDERS[new_provider]['label']}**\n\n"
+            f"أضِف `{key_var}` في ملف `.env` ثم أعد تشغيل الوكيل."
+        )).send()
+        return
+
+    from agent.nodes import switch_provider
+    try:
+        switch_provider(new_provider)
+        new_thread_id = str(uuid.uuid4())
+        cl.user_session.set("current_provider", new_provider)
+        cl.user_session.set("thread_id", new_thread_id)
+        _save_session(new_thread_id, new_provider)
+        await cl.Message(content=(
+            f"✅ **تم تغيير النموذج!**\n\n"
+            f"الحالي: {_get_model_display(new_provider)}\n"
+            f"جلسة جديدة: `{new_thread_id[:8]}…`"
+        )).send()
+    except Exception as exc:
+        await cl.Message(content=f"❌ خطأ في تغيير النموذج: {exc}").send()
+
+
+@cl.action_callback("switch_model")
+async def _on_switch_model(action: cl.Action):
+    """One-click model switch from a control-panel button."""
+    provider = (action.payload or {}).get("provider", "")
+    await _apply_model_switch(provider)
+
+
+@cl.action_callback("connect_service")
+async def _on_connect_service(action: cl.Action):
+    """One-click integration connect (GitHub, Drive…) from a control-panel button."""
+    service = (action.payload or {}).get("service", "")
+    if not service:
+        return
+    try:
+        from core.integrations import connect_integration
+        await cl.Message(content=connect_integration(service)).send()
+    except Exception as exc:
+        await cl.Message(content=f"❌ تعذّر بدء ربط `{service}`: {exc}").send()
+
+
+# ── Feature buttons (real, working flows — click instead of typing) ─────────
+_FEATURE_ITEMS: list[tuple[str, str]] = [
+    ("📊 تقرير Excel", "أنشئ تقرير مبيعات Excel من بيانات تجريبية ونسّقه باحترافية على سطح المكتب"),
+    ("📝 مستند Word", "أنشئ مستند Word احترافياً بعنوان ومقدمة وجدول على سطح المكتب"),
+    ("📑 PowerPoint", "أنشئ عرض PowerPoint من 5 شرائح حول موضوع تجريبي على سطح المكتب"),
+    ("🔄 تحويل ملف", "حوّل ملف Word إلى PDF — اسألني عن مسار الملف"),
+    ("🏗️ بناء EXE", "ابنِ تطبيق آلة حاسبة بواجهة رسومية وحوّله إلى exe على سطح المكتب"),
+    ("💹 تحليل سوق", "حلّل زوج EUR/USD فنياً مع الاتجاه ومستويات الدعم والمقاومة"),
+    ("🌤️ الطقس الآن", "ما حالة الطقس الآن؟ استخدم موقعي الحالي"),
+    ("📚 بحث ودراسة", "ابحث في الويب عن موضوع أحدده واكتب دراسة موجزة"),
+    ("🖥️ فحص النظام", "اعرض تقرير حالة النظام: المعالج والذاكرة والأقراص وأعلى العمليات"),
+]
+
+
+def _control_panel_groups() -> list[tuple[str, list]]:
+    """Return the control panel as titled groups of action buttons."""
+    # 1) Models — one-click switching
+    model_actions = [
+        cl.Action(name="switch_model", label=f"{info['icon']} {info['label'].split(' (')[0]}",
+                  payload={"provider": prov})
+        for prov, info in _PROVIDERS.items()
+    ]
+    # 2) Integrations — one-click connect
+    integration_actions = [
+        cl.Action(name="connect_service", label="🔗 GitHub", payload={"service": "github"}),
+        cl.Action(name="connect_service", label="🔗 Google Drive", payload={"service": "gdrive"}),
+        cl.Action(name="connect_service", label="🔗 Telegram", payload={"service": "telegram"}),
+        cl.Action(name="connect_service", label="🔗 Discord", payload={"service": "discord"}),
+        cl.Action(name="run_cmd", label="➕ المزيد", payload={"cmd": "/integrations"}),
+    ]
+    # 3) Features + workspace — click instead of typing
+    feature_actions = [cl.Action(name="pick_workspace", label="📁 مجلد العمل", payload={})]
+    feature_actions += [
+        cl.Action(name="run_cmd", label=label, payload={"cmd": cmd})
+        for label, cmd in _FEATURE_ITEMS
+    ]
+    return [
+        ("🧠 **اختر نموذج الذكاء الاصطناعي** (تبديل بنقرة)", model_actions),
+        ("🔗 **التكاملات** (اربط خدماتك)", integration_actions),
+        ("🛠️ **الميزات والأدوات** (نفّذ بنقرة)", feature_actions),
+    ]
+
+
+async def _show_control_panel() -> None:
+    """Render the professional control panel as titled button groups."""
+    current = cl.user_session.get("current_provider", _PROVIDER)
+    await cl.Message(content=(
+        f"# 🎛️ لوحة التحكّم\nالنموذج الحالي: {_get_model_display(current)}"
+    )).send()
+    for title, actions in _control_panel_groups():
+        await cl.Message(content=title, actions=actions).send()
+
+
 # ── Workspace folder picker ─────────────────────────────────────────────────
 async def _pick_workspace_folder() -> str | None:
     """Open a native Windows folder picker dialog and return the selected path."""
@@ -1231,20 +1350,25 @@ async def _on_pick_workspace(action: cl.Action):
 async def set_starters():
     """Ready-made, organized action cards shown on a new chat (click to run)."""
     return [
-        cl.Starter(label="📁 اختر مجلد العمل", message="/workspace"),
-        cl.Starter(label="🔌 التكاملات", message="/integrations"),
+        # ── Control & setup ──
+        cl.Starter(label="🎛️ لوحة التحكّم", message="/panel"),
         cl.Starter(label="🔄 تغيير النموذج", message="/model"),
-        cl.Starter(label="📋 كل الأوامر", message="/help"),
+        cl.Starter(label="📁 مجلد العمل", message="/workspace"),
+        cl.Starter(label="🔌 التكاملات", message="/integrations"),
+        # ── Office & files ──
         cl.Starter(label="📊 تقرير Excel احترافي",
                    message="أنشئ تقرير مبيعات Excel من بيانات تجريبية، أضف صف إجمالي ورسماً بيانياً ونسّقه على سطح المكتب"),
+        cl.Starter(label="📝 مستند Word",
+                   message="أنشئ مستند Word احترافياً بعنوان ومقدمة وجدول منسّق على سطح المكتب"),
         cl.Starter(label="🏗️ ابنِ تطبيق EXE",
                    message="ابنِ تطبيق آلة حاسبة بسيط بواجهة رسومية وحوّله إلى ملف exe على سطح المكتب"),
+        # ── Research & data ──
         cl.Starter(label="📚 بحث ودراسة",
                    message="ابحث في الويب عن أفضل ممارسات إدارة الوقت واكتب دراسة منظّمة في ملف Word على سطح المكتب"),
         cl.Starter(label="💹 تحليل سوق",
                    message="حلّل زوج EUR/USD على فريم الساعة وأعطني قراءة فنية"),
-        cl.Starter(label="🌤️ الطقس الآن",
-                   message="كم درجة الحرارة في الرياض الآن؟"),
+        cl.Starter(label="🖥️ فحص النظام",
+                   message="اعرض تقرير حالة النظام: المعالج والذاكرة والأقراص وأعلى العمليات استهلاكاً"),
     ]
 
 
@@ -1626,67 +1750,23 @@ async def on_message(message: cl.Message) -> None:
         )).send()
         return
 
+    # ── Control panel command ─────────────────────────────────────────────────
+    if user_text.lower().strip() in ("/panel", "/لوحة", "لوحة التحكم", "/controls"):
+        await _show_control_panel()
+        return
+
     # ── Model switch command ──────────────────────────────────────────────────
     if user_text.lower().startswith("/model"):
         parts = user_text.split(maxsplit=1)
         if len(parts) == 2:
-            new_provider = parts[1].strip().lower()
-            if new_provider in _PROVIDERS:
-                # Check if API key is available
-                key_vars = {
-                    "google": "GOOGLE_API_KEY",
-                    "anthropic": "ANTHROPIC_API_KEY",
-                    "openai": "OPENAI_API_KEY",
-                    "deepseek": "DEEPSEEK_API_KEY",
-                    "groq": "GROQ_API_KEY",
-                    "ollama": "",
-                }
-                api_key = "ollama-local" if new_provider == "ollama" else os.getenv(key_vars.get(new_provider, ""), "").strip()
-                if not api_key:
-                    await cl.Message(
-                        content=(
-                            f"❌ **مفتاح API غير موجود لـ {_PROVIDERS[new_provider]['label']}**\n\n"
-                            f"يرجى إضافة `{key_vars[new_provider]}` في ملف `.env` ثم أعد تشغيل الوكيل."
-                        )
-                    ).send()
-                    return
-
-                # Switch the provider
-                from agent.nodes import switch_provider
-                try:
-                    switch_provider(new_provider)
-                    cl.user_session.set("current_provider", new_provider)
-                    _save_session(thread_id, new_provider)
-
-                    # Start a new session for the new model
-                    new_thread_id = str(uuid.uuid4())
-                    cl.user_session.set("thread_id", new_thread_id)
-                    _save_session(new_thread_id, new_provider)
-
-                    await cl.Message(
-                        content=(
-                            f"✅ **تم تغيير النموذج بنجاح!**\n\n"
-                            f"النموذج الحالي: {_get_model_display(new_provider)}\n"
-                            f"جلسة جديدة: `{new_thread_id[:8]}…`\n\n"
-                            "أخبرني بما تريد تنفيذه."
-                        )
-                    ).send()
-                except Exception as exc:
-                    await cl.Message(
-                        content=f"❌ **خطأ في تغيير النموذج**: {exc}"
-                    ).send()
-            else:
-                available = ", ".join(f"`{k}`" for k in _PROVIDERS.keys())
-                await cl.Message(
-                    content=f"❌ نموذج غير معروف: `{new_provider}`\n\nالنماذج المتاحة: {available}"
-                ).send()
+            await _apply_model_switch(parts[1].strip().lower())
         else:
+            # No argument → show the one-click model buttons.
             current = cl.user_session.get("current_provider", _PROVIDER)
+            _model_actions = _control_panel_groups()[0][1]
             await cl.Message(
-                content=(
-                    f"النموذج الحالي: {_get_model_display(current)}\n\n"
-                    "للتغيير: `/model google` | `/model anthropic` | `/model openai` | `/model deepseek` | `/model groq` | `/model ollama`"
-                )
+                content=f"النموذج الحالي: {_get_model_display(current)}\n\n**اختر نموذجاً للتبديل بنقرة:**",
+                actions=_model_actions,
             ).send()
         return
 
