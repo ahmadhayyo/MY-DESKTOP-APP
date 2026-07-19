@@ -13,6 +13,8 @@ import os
 from pathlib import Path
 from langchain_core.tools import tool
 
+from config import resolve_output_path
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  EXCEL TOOLS
@@ -73,7 +75,7 @@ def excel_create(path: str, data: str, sheet_name: str = "Sheet1") -> str:
     except Exception:
         pass
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     p.parent.mkdir(parents=True, exist_ok=True)
     wb.save(str(p))
     return f"✅ Excel file created: {p} ({len(grid)} rows × {len(grid[0]) if grid else 0} cols)"
@@ -92,7 +94,7 @@ def excel_read(path: str, sheet_name: str = "") -> str:
     except ImportError:
         return "Error: openpyxl not installed. Run: pip install openpyxl"
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     if not p.exists():
         return f"Error: file not found: {path}"
 
@@ -140,7 +142,7 @@ def excel_edit(path: str, cell: str, value: str, sheet_name: str = "") -> str:
     except ImportError:
         return "Error: openpyxl not installed. Run: pip install openpyxl"
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     if not p.exists():
         return f"Error: file not found: {path}"
 
@@ -171,7 +173,7 @@ def excel_add_rows(path: str, data: str, sheet_name: str = "") -> str:
     except ImportError:
         return "Error: openpyxl not installed. Run: pip install openpyxl"
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     if not p.exists():
         return f"Error: file not found: {path}"
 
@@ -215,7 +217,7 @@ def excel_add_column(path: str, header: str, formula_or_values: str, sheet_name:
     except ImportError:
         return "Error: openpyxl not installed. Run: pip install openpyxl"
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     if not p.exists():
         return f"Error: file not found: {path}"
 
@@ -290,7 +292,7 @@ def word_create(path: str, content: str, title: str = "") -> str:
         else:
             doc.add_paragraph(stripped)
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     p.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(p))
     return f"Word file created: {p}"
@@ -308,7 +310,7 @@ def word_read(path: str) -> str:
     except ImportError:
         return "Error: python-docx not installed. Run: pip install python-docx"
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     if not p.exists():
         return f"Error: file not found: {path}"
 
@@ -356,7 +358,7 @@ def word_edit(path: str, find_text: str, replace_text: str) -> str:
     except ImportError:
         return "Error: python-docx not installed. Run: pip install python-docx"
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     if not p.exists():
         return f"Error: file not found: {path}"
 
@@ -390,7 +392,7 @@ def pdf_read(path: str, max_pages: int = 50) -> str:
     except ImportError:
         return "Error: pypdf not installed. Run: pip install pypdf"
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     if not p.exists():
         return f"Error: file not found: {path}"
 
@@ -428,7 +430,7 @@ def pdf_create(path: str, content: str, title: str = "") -> str:
     except ImportError:
         return "Error: reportlab not installed. Run: pip install reportlab"
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     p.parent.mkdir(parents=True, exist_ok=True)
 
     doc = SimpleDocTemplate(str(p), pagesize=A4)
@@ -479,7 +481,7 @@ def pdf_merge(paths: str, output_path: str) -> str:
             return f"Error: file not found: {fp}"
         writer.append(fp)
 
-    out = Path(output_path)
+    out = Path(resolve_output_path(output_path))
     out.parent.mkdir(parents=True, exist_ok=True)
     writer.write(str(out))
     return f"Merged {len(file_list)} PDFs into: {out}"
@@ -501,7 +503,7 @@ def convert_excel_to_pdf(excel_path: str, pdf_path: str) -> str:
     except ImportError:
         return "Error: openpyxl and reportlab required. Run: pip install openpyxl reportlab"
 
-    p = Path(excel_path)
+    p = Path(resolve_output_path(excel_path))
     if not p.exists():
         return f"Error: file not found: {excel_path}"
 
@@ -515,7 +517,7 @@ def convert_excel_to_pdf(excel_path: str, pdf_path: str) -> str:
     if not data:
         return "Error: spreadsheet is empty"
 
-    out = Path(pdf_path)
+    out = Path(resolve_output_path(pdf_path))
     out.parent.mkdir(parents=True, exist_ok=True)
 
     doc = SimpleDocTemplate(str(out), pagesize=landscape(A4))
@@ -550,7 +552,7 @@ def convert_word_to_pdf(word_path: str, pdf_path: str) -> str:
     except ImportError:
         return "Error: python-docx and reportlab required. Run: pip install python-docx reportlab"
 
-    p = Path(word_path)
+    p = Path(resolve_output_path(word_path))
     if not p.exists():
         return f"Error: file not found: {word_path}"
 
@@ -571,7 +573,7 @@ def convert_word_to_pdf(word_path: str, pdf_path: str) -> str:
         else:
             story.append(Paragraph(text, styles["Normal"]))
 
-    out = Path(pdf_path)
+    out = Path(resolve_output_path(pdf_path))
     out.parent.mkdir(parents=True, exist_ok=True)
     pdf_doc = SimpleDocTemplate(str(out), pagesize=A4)
     pdf_doc.build(story)

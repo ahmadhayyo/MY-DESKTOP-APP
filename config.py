@@ -133,6 +133,38 @@ DEFAULT_WORKSPACE: Path = Path(_get("DEFAULT_WORKSPACE", str(ROOT_DIR)))
 DESKTOP_DIR: Path = Path(_get("DESKTOP_DIR", str(Path.home() / "Desktop")))
 DOWNLOADS_DIR: Path = Path(_get("DOWNLOADS_DIR", str(Path.home() / "Downloads")))
 
+
+def resolve_output_path(p: str) -> str:
+    """Resolve a user/model-supplied output path consistently across ALL tools.
+
+    Handles the shortcuts the model naturally uses so files never land in the
+    wrong folder:
+      • 'desktop:foo.xlsx'   → <Desktop>/foo.xlsx
+      • 'downloads:foo.pdf'  → <Downloads>/foo.pdf
+      • '~', env vars        → expanded
+      • relative paths       → resolved against the active workspace if one is set,
+                               else the Desktop (a sensible default for outputs).
+    Absolute paths are returned unchanged.
+    """
+    import os as _os
+    s = str(p or "").strip()
+    low = s.lower()
+    if low.startswith("desktop:"):
+        return _os.path.join(str(DESKTOP_DIR), s.split(":", 1)[1].strip().lstrip("/\\"))
+    if low.startswith("downloads:"):
+        return _os.path.join(str(DOWNLOADS_DIR), s.split(":", 1)[1].strip().lstrip("/\\"))
+    expanded = _os.path.expandvars(_os.path.expanduser(s))
+    if _os.path.isabs(expanded):
+        return expanded
+    # Relative → workspace, else Desktop.
+    try:
+        from core.workspace_state import get_workspace
+        ws = get_workspace()
+    except Exception:
+        ws = ""
+    base = ws if ws else str(DESKTOP_DIR)
+    return _os.path.join(base, expanded)
+
 # ── Browser ─────────────────────────────────────────────────────────────────
 BROWSER_HEADLESS: bool = _get("BROWSER_HEADLESS", "false").lower() == "true"
 BROWSER_USER_DATA_DIR: Path = ROOT_DIR / ".browser_profile"
