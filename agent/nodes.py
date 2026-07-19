@@ -1296,11 +1296,19 @@ RULES:
 """
 
 def _extract_workspace(messages: list, current_workspace: str) -> str:
-    """Extract the project folder the user pointed at, from recent HumanMessages.
+    """Determine the active project folder, with strict precedence.
 
-    Only user messages are scanned — a path the agent invented in its own output
-    must never become the workspace. If the path names a file, its parent folder
-    is used, so the workspace is always a directory.
+    Precedence (highest first):
+      1. A directory path the user TYPED in their LATEST message.
+      2. The [WORKSPACE:] marker injected into the LATEST message (folder picker).
+      3. The workspace already persisted for this conversation (current_workspace).
+
+    CRITICAL: only the LATEST user message is inspected for a new path. Older
+    messages are NEVER scanned — otherwise a path mentioned earlier in the
+    conversation (a previous task, a folder that was only referenced) would
+    override the current workspace and make the agent "jump" to the wrong folder
+    on the next command. Once set, the workspace sticks until the user explicitly
+    names a different folder.
     """
     import os as _os
     import re
@@ -1321,21 +1329,21 @@ def _extract_workspace(messages: list, current_workspace: str) -> str:
                 return cand
         return ""
 
-    for msg in reversed(messages[-8:]):
-        if not isinstance(msg, HumanMessage):
-            continue
-        raw = msg.content
+    # Find ONLY the latest human message.
+    latest = None
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            latest = msg
+            break
+
+    if latest is not None:
+        raw = latest.content
         if isinstance(raw, list):   # multimodal: [{"type":"text","text":...}, ...]
-            text = " ".join(
-                p.get("text", "") for p in raw if isinstance(p, dict)
-            )
+            text = " ".join(p.get("text", "") for p in raw if isinstance(p, dict))
         else:
             text = raw if isinstance(raw, str) else str(raw)
 
-        # Separate the machine-injected [WORKSPACE:] marker from the user's own
-        # typed text. A path the user TYPES in THIS message is a fresher, stronger
-        # signal than a marker carried over from a previous folder-picker choice —
-        # so it must win, otherwise the agent "jumps" to the old folder.
+        # Separate the machine-injected [WORKSPACE:] marker from the user's text.
         marker_path = ""
         ws_match = re.search(r'\[WORKSPACE:\s*(.+?)\]', text)
         if ws_match:
@@ -1344,14 +1352,16 @@ def _extract_workspace(messages: list, current_workspace: str) -> str:
         else:
             text_wo_marker = text
 
-        # 1) An explicit directory the user typed in this message wins.
+        # 1) An explicit directory the user typed in THIS message wins.
         typed = _first_valid_dir(text_wo_marker)
         if typed:
             return typed
 
-        # 2) Otherwise fall back to the injected marker (folder-picker choice).
+        # 2) Otherwise the injected marker (folder-picker choice for this message).
         if marker_path and _os.path.isdir(marker_path):
             return marker_path
+
+    # 3) Fall back to the workspace already persisted for this conversation.
     return current_workspace
 
 

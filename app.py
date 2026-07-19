@@ -1183,6 +1183,22 @@ def _set_workspace(path: str) -> None:
         pass
 
 
+async def _restore_thread_workspace(thread_id: str) -> str:
+    """Load a thread's saved workspace from the graph checkpointer and make it
+    active (session + process-wide). Returns the restored path or ''."""
+    if not thread_id:
+        return ""
+    try:
+        st = await GRAPH.aget_state({"configurable": {"thread_id": thread_id}})
+        ws = (st.values.get("workspace", "") if st else "") or ""
+    except Exception:
+        ws = ""
+    if ws and os.path.isdir(ws):
+        _set_workspace(ws)
+        return ws
+    return ""
+
+
 @cl.action_callback("pick_workspace")
 async def _on_pick_workspace(action: cl.Action):
     """Open native folder picker and set as working directory."""
@@ -1254,21 +1270,27 @@ async def on_chat_start() -> None:
     last_thread = last_session.get("thread_id")
     saved_provider = last_session.get("provider", _PROVIDER)
 
-    # ── Restore workspace from last session ────────────────────────────
+    # ── Restore workspace: prefer the resumable thread's OWN saved workspace,
+    #    then the last-session value. This keeps each conversation pinned to its
+    #    own project folder instead of leaking Desktop/the app dir. ──────────
     saved_workspace = last_session.get("workspace", "")
-    if saved_workspace and os.path.isdir(saved_workspace):
-        _set_workspace(saved_workspace)
-    else:
-        _set_workspace("")
 
-    # Check if the old thread has resumable work (for the hint message only).
+    # Check if the old thread has resumable work, AND recover its workspace.
     has_work = False
     if last_thread:
         try:
             state = await GRAPH.aget_state({"configurable": {"thread_id": last_thread}})
             has_work = bool(state and state.values.get("messages"))
+            _thread_ws = (state.values.get("workspace", "") if state else "") or ""
+            if _thread_ws and os.path.isdir(_thread_ws):
+                saved_workspace = _thread_ws
         except Exception:
             pass
+
+    if saved_workspace and os.path.isdir(saved_workspace):
+        _set_workspace(saved_workspace)
+    else:
+        _set_workspace("")
 
     # ALWAYS start a fresh graph thread — old state must never bleed into a
     # new conversation. The old thread is only used when the user explicitly
@@ -1387,6 +1409,19 @@ async def on_chat_resume(thread: dict) -> None:
     cl.user_session.set("voice_name", "salma")
     cl.user_session.set("audio_buffer", bytearray())
     cl.user_session.set("audio_mime", "audio/webm")
+
+    # Restore THIS conversation's own workspace from its saved graph state, so
+    # continuing it keeps working in the same project folder (not Desktop).
+    _restored_ws = ""
+    try:
+        _st = await GRAPH.aget_state({"configurable": {"thread_id": thread_id}})
+        _restored_ws = (_st.values.get("workspace", "") if _st else "") or ""
+    except Exception:
+        _restored_ws = ""
+    if _restored_ws and os.path.isdir(_restored_ws):
+        _set_workspace(_restored_ws)
+    else:
+        _set_workspace("")
 
     # Restore provider from saved session
     last_session = _load_last_session()
@@ -1697,19 +1732,23 @@ async def on_message(message: cl.Message) -> None:
             return
         target = candidates[0]
         cl.user_session.set("thread_id", target["thread_id"])
+        _loaded_ws = await _restore_thread_workspace(target["thread_id"])
         _save_session(target["thread_id"], cl.user_session.get("current_provider", _PROVIDER))
         await cl.Message(
             content=(
                 f"✅ **تم استعادة المحادثة**\n\n"
                 f"العنوان: {target['title'] or '(بدون عنوان)'}\n"
-                f"الجلسة: `{target['thread_id'][:8]}…` · {target['message_count']} رسالة\n\n"
-                "تابع المحادثة من حيث توقفت — أو اكتب طلباً جديداً."
+                f"الجلسة: `{target['thread_id'][:8]}…` · {target['message_count']} رسالة\n"
+                + (f"📂 مجلد العمل: `{_loaded_ws}`\n" if _loaded_ws else "")
+                + "\nتابع المحادثة من حيث توقفت — أو اكتب طلباً جديداً."
             )
         ).send()
         return
 
     if user_text.lower() in ("/new", "/جديد"):
-        # Start a brand new conversation explicitly
+        # Start a brand new conversation explicitly — clear the workspace so the
+        # new chat doesn't inherit the previous project's folder.
+        _set_workspace("")
         new_thread_id = str(uuid.uuid4())
         cl.user_session.set("thread_id", new_thread_id)
         _save_session(new_thread_id, cl.user_session.get("current_provider", _PROVIDER))
@@ -1988,6 +2027,7 @@ async def on_message(message: cl.Message) -> None:
                     cl.user_session.set("thread_id", _try_tid)
                     thread_id = _try_tid
                     config = _try_cfg
+                    await _restore_thread_workspace(_try_tid)
                     _save_session(_try_tid, cl.user_session.get("current_provider", _PROVIDER))
                     await cl.Message(content="▶️ جارٍ الاستئناف من حيث توقفت…").send()
                     await _run_graph(Command(resume="continue"), config)
@@ -1998,6 +2038,7 @@ async def on_message(message: cl.Message) -> None:
                     cl.user_session.set("thread_id", _try_tid)
                     thread_id = _try_tid
                     config = _try_cfg
+                    await _restore_thread_workspace(_try_tid)
                     _save_session(_try_tid, cl.user_session.get("current_provider", _PROVIDER))
                     await cl.Message(content="🔁 جارٍ متابعة المهمة السابقة…").send()
                     inputs = {
