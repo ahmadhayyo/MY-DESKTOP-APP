@@ -22,14 +22,29 @@ from config import DESKTOP_DIR, DOWNLOADS_DIR
 MAX_READ_BYTES = 200_000  # ~200KB per read tool call
 
 
-def _resolve_path(p: str) -> Path:
-    """Expand ~, env vars, and resolve to absolute Path.
+def _resolve_shortcut(p: str) -> str | None:
+    """Expand location shortcuts the model commonly uses: 'desktop:', 'downloads:'.
+    Returns an absolute path string, or None if `p` has no such prefix."""
+    low = p.strip().lower()
+    if low.startswith("desktop:"):
+        return os.path.join(DESKTOP_DIR, p.split(":", 1)[1].strip().lstrip("/\\"))
+    if low.startswith("downloads:"):
+        return os.path.join(DOWNLOADS_DIR, p.split(":", 1)[1].strip().lstrip("/\\"))
+    return None
 
-    Relative paths resolve against the active workspace (the user's project
-    folder) when one is set — so read_file('main.py') means
-    '<workspace>/main.py', NOT '<app-dir>/main.py'. Absolute paths and
-    ~-paths are unaffected.
+
+def _resolve_path(p: str) -> Path:
+    """Expand shortcuts, ~, env vars, and resolve to absolute Path.
+
+    - 'desktop:foo' / 'downloads:foo' → the Desktop/Downloads folder.
+    - Relative paths resolve against the active workspace (the user's project
+      folder) when one is set — so read_file('main.py') means
+      '<workspace>/main.py', NOT '<app-dir>/main.py'.
+    - Absolute paths and ~-paths are unaffected.
     """
+    shortcut = _resolve_shortcut(p)
+    if shortcut is not None:
+        return Path(shortcut).resolve()
     expanded = os.path.expandvars(os.path.expanduser(p))
     if not os.path.isabs(expanded):
         try:

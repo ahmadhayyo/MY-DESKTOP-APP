@@ -55,3 +55,8 @@ _spec/
 *_project/
 *.spec
 *.exe
+
+# Local backups (may contain secrets) — never commit
+.env.bak*
+.env.bak_*
+backup_history_*/

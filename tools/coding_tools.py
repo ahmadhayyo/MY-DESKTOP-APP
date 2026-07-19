@@ -19,12 +19,18 @@ from config import DESKTOP_DIR
 
 
 def _resolve_path(p: str) -> Path:
-    """Expand ~, env vars, and resolve to absolute Path.
+    """Expand shortcuts ('desktop:', 'downloads:'), ~, env vars → absolute Path.
 
     Relative paths resolve against the active workspace (the user's project
     folder) when one is set — so run_script('main.py') means
     '<workspace>/main.py', NOT '<app-dir>/main.py'.
     """
+    low = p.strip().lower()
+    if low.startswith("desktop:"):
+        return Path(os.path.join(DESKTOP_DIR, p.split(":", 1)[1].strip().lstrip("/\\"))).resolve()
+    if low.startswith("downloads:"):
+        from config import DOWNLOADS_DIR
+        return Path(os.path.join(DOWNLOADS_DIR, p.split(":", 1)[1].strip().lstrip("/\\"))).resolve()
     expanded = os.path.expandvars(os.path.expanduser(p))
     if not os.path.isabs(expanded):
         try:

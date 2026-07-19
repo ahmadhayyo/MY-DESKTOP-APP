@@ -2364,9 +2364,14 @@ CONTINUE:
 الأداة التالية على نفس السطر مع CONTINUE: أو لا تكتب CONTINUE أصلاً.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-⚡ قاعدة النجاح الفوري (للتنزيل/الحفظ فقط):
-إذا رأيت "[OK] Downloaded" أو "[OK] Saved" أو "[OK] Moved" أو "[OK] Created" في نتائج الأدوات
-→ TASK_COMPLETE فوراً دون تردد.
+⚡ قاعدة إكمال الخطوات (حرجة — أعلى أولوية على أي قاعدة نجاح):
+انظر إلى قسم «حالة المهمة الحالية» بالأسفل (الخطوات المخططة مقابل المنجزة).
+🚫 لا تُعلن TASK_COMPLETE ما دامت هناك خطوات مخطّطة لم تُنفَّذ بعد.
+   إذا كانت (المنجزة < المخططة) → يجب أن تقول: CONTINUE: [أداة الخطوة التالية]
+"[OK] Created" أو "[OK] Saved" أو "[OK] Downloaded" = نجاح خطوة **واحدة** فقط — وليس المهمة كلها.
+   مثال: مهمة من 6 خطوات، أنشأت المجلد (الخطوة 1) → CONTINUE للخطوة 2 (اكتب الملف)، لا TASK_COMPLETE.
+✅ أعلن TASK_COMPLETE فقط عندما تُنفَّذ كل خطوات الخطة فعلاً (المنجزة ≥ المخططة) وتحقّق هدف المستخدم كاملاً.
+استثناء وحيد: إذا كانت المهمة **كلها خطوة واحدة** (تنزيل/حفظ/إنشاء ملف واحد فقط) وظهر "[OK]" → TASK_COMPLETE فوراً.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🚨 قاعدة ما بعد فتح التطبيق (أولوية قصوى)
@@ -2749,12 +2754,15 @@ def should_continue(state: AgentState) -> Literal["worker", "__end__"]:
                 and recent_names[0] not in _EXPLORATION_TOOLS):
             return "__end__"
 
-    # ── Hard success detection: stop as soon as a task goal is met ───────────
-    # If a download/write/save tool returned [OK] and we've done 2+ iterations,
-    # the task is done. Don't wait for the reviewer to figure it out.
+    # ── Stuck-loop breaker (last resort) ─────────────────────────────────────
+    # NOTE: "[OK] Created"/"[OK] Wrote" are intermediate steps in multi-step
+    # tasks, NOT terminal — they must NOT trigger completion here, or a legit
+    # 6-step task gets cut off at step 3. Completion is the reviewer's job
+    # (it now gates TASK_COMPLETE on all plan steps being done). This block only
+    # breaks a genuine stuck loop where the reviewer keeps saying CONTINUE many
+    # times after a clearly-terminal download/move result.
     _SUCCESS_SIGNALS = (
-        "[OK] Downloaded", "[OK] Saved", "[OK] Moved", "[OK] Copied",
-        "[OK] Loaded", "[OK] Created", "[OK] Wrote",
+        "[OK] Downloaded", "[OK] Moved", "[OK] Copied", "[OK] Loaded",
     )
     if iteration >= 2:
         recent_tool_results = [
@@ -2765,8 +2773,8 @@ def should_continue(state: AgentState) -> Literal["worker", "__end__"]:
             any(sig in r for sig in _SUCCESS_SIGNALS)
             for r in recent_tool_results
         ):
-            # A success result exists — check if reviewer already told us to continue
-            # If the reviewer has said CONTINUE 3+ times after a success, force stop
+            # Only break if the reviewer is clearly STUCK (many CONTINUEs),
+            # not merely progressing through a multi-step plan.
             reviewer_continues = sum(
                 1 for m in messages[-20:]
                 if isinstance(m, AIMessage)
@@ -2775,7 +2783,7 @@ def should_continue(state: AgentState) -> Literal["worker", "__end__"]:
                     (m.metadata or {}).get("_original_verdict", "") if hasattr(m, "metadata") else ""
                 )
             )
-            if reviewer_continues >= 3:
+            if reviewer_continues >= 8:
                 logger.warning("[should_continue] Forcing __end__: reviewer said CONTINUE %d times after success.", reviewer_continues)
                 return "__end__"
 
