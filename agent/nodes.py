@@ -448,6 +448,10 @@ _CORE_TOOL_NAMES = {
     "send_email", "http_request", "telegram_bot_send",
     # ── API key & endpoint verification ────────────────────────────────────
     "test_api_key", "test_env_api_keys", "test_endpoint",
+    # ── Android device control (ADB) ────────────────────────────────────────
+    "android_devices", "android_device_info", "android_screenshot",
+    "android_tap", "android_swipe", "android_input_text", "android_key_event",
+    "android_list_apps", "android_launch_app", "android_shell",
     # ── Long-term memory + scheduler ───────────────────────────────────────
     "remember_fact", "recall_facts", "list_memory",
     "schedule_task", "list_scheduled_tasks", "cancel_scheduled_task",
@@ -1833,6 +1837,13 @@ def worker_node(state: AgentState) -> dict:
         "  🔑 فحص مفاتيح API والروابط: test_api_key (هل المفتاح يعمل؟ ما النماذج المتاحة؟ "
         "مقيّد؟ حدود؟), test_env_api_keys (افحص كل مفاتيح البيئة دفعة واحدة), "
         "test_endpoint (هل الرابط يعمل/يحتاج مصادقة؟)\n"
+        "  📱 التحكّم بهاتف أندرويد (عبر ADB — يتطلب توصيل الهاتف وتفعيل تصحيح USB): "
+        "android_devices (الأجهزة المتصلة), android_device_info, android_screenshot "
+        "(التقط الشاشة قبل أي نقر لمعرفة الإحداثيات), android_tap, android_swipe, "
+        "android_input_text, android_key_event (back/home/power/...), android_list_apps, "
+        "android_launch_app, android_install_apk, android_uninstall_app, "
+        "android_push_file, android_pull_file, android_open_url, android_shell. "
+        "إن وُجد أكثر من جهاز، حدّد device=<serial> من android_devices().\n"
         "  🔊 الصوت: volume_control, text_to_speech, show_notification\n"
         "  📄 المكتبية الأساسية: excel_create/read/edit, word_create/read/edit, pdf_read/create/merge\n"
         "  📊 Excel احترافي: excel_set_formula, excel_add_total_row, excel_add_chart, "

@@ -137,6 +137,25 @@ def _load_network():
 _import_category("network", _load_network)
 
 # ═══════════════════════════════════════════════════════════
+# ANDROID (ADB device control)
+# ═══════════════════════════════════════════════════════════
+def _load_android():
+    from tools.android_tools import (
+        android_devices, android_device_info, android_screenshot,
+        android_tap, android_swipe, android_input_text, android_key_event,
+        android_list_apps, android_launch_app, android_install_apk,
+        android_uninstall_app, android_push_file, android_pull_file,
+        android_open_url, android_shell,
+    )
+    return [android_devices, android_device_info, android_screenshot,
+            android_tap, android_swipe, android_input_text, android_key_event,
+            android_list_apps, android_launch_app, android_install_apk,
+            android_uninstall_app, android_push_file, android_pull_file,
+            android_open_url, android_shell]
+
+_import_category("android", _load_android)
+
+# ═══════════════════════════════════════════════════════════
 # API KEY & ENDPOINT VERIFICATION
 # ═══════════════════════════════════════════════════════════
 def _load_api_keys():
