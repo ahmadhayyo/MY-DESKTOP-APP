@@ -42,6 +42,14 @@ if not os.environ.get("CHAINLIT_AUTH_SECRET"):
     except OSError:
         pass  # read-only FS — secret is still in env for this run
 
+# ── Ensure the file-upload directory exists ───────────────────────────────────
+# Chainlit deletes `.files/` on shutdown (its own cleanup) but never recreates
+# it on startup, and its per-session `mkdir(exist_ok=True)` call does NOT create
+# missing parents — so the very first upload after a restart fails with
+# "FileNotFoundError: [WinError 3] cannot find the path .files\<session-id>".
+# Recreating the parent here, before Chainlit ever handles a request, fixes it.
+(Path(__file__).parent / ".files").mkdir(parents=True, exist_ok=True)
+
 import chainlit as cl            # noqa: E402
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage as _SysMsg, ToolMessage  # noqa: E402
 from langgraph.types import Command  # noqa: E402
