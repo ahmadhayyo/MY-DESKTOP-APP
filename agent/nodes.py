@@ -493,6 +493,17 @@ def _select_tools_for_ollama(tools: list) -> list:
     return _select_tools(tools, budget=80)
 
 
+def _select_tools_for_groq(tools: list) -> list:
+    """Groq's free tier caps llama-3.3-70b-versatile at 12,000 tokens/minute —
+    126 tool schemas alone measure ~25,000 tokens, more than double that cap,
+    so EVERY worker call would fail with a 413 'request too large' regardless
+    of retries. Cut to a budget that reliably fits: ~30 tools (~5,000 tokens)
+    leaves headroom for the ~3,500-token system prompt + conversation.
+    All 241 tools stay registered — this only trims what's bound per call,
+    exactly like the existing Ollama budget above."""
+    return _select_tools(tools, budget=30)
+
+
 def _build_tools_binding():
     """Build the LLM+tools binding, using ReAct for non-capable models."""
     global _react_mode, _react_tool_prompt, _is_offline
@@ -512,10 +523,15 @@ def _build_tools_binding():
         _react_mode = False
         _react_tool_prompt = ""
         # Cap the tool list per provider:
-        #  • Ollama  → ~80 (small context)
+        #  • Ollama  → ~80 (small context window)
+        #  • Groq    → ~30 (free-tier TPM cap of 12,000 tok/min makes 126 tools
+        #              alone — ~25,000 tokens — impossible to fit; see
+        #              _select_tools_for_groq for the measured breakdown)
         #  • others  → ≤126 (Groq/OpenAI/DeepSeek hard-limit is 128; margin of safety)
         if _PROVIDER == "ollama":
             active_tools = _select_tools_for_ollama(active_tools)
+        elif _PROVIDER == "groq":
+            active_tools = _select_tools_for_groq(active_tools)
         else:
             active_tools = _select_tools(active_tools, budget=126)
         try:
@@ -764,6 +780,30 @@ def _safe_llm_invoke(llm_getter, messages: list[BaseMessage], *, label: str = "L
                     "أو قلّل الخطوات. إن ظهر 'limit: 0' فالنموذج غير متاح مجاناً — "
                     "استخدم gemini-2.5-flash أو Groq."
                 )
+
+            # ── Request too large for this model's per-minute token budget
+            #    (HTTP 413) — MUST be checked before the auth-error block below,
+            #    because Groq's 413 message contains the word "billing" (a link
+            #    to upgrade), which would otherwise be misclassified as an auth
+            #    failure. Distinct from 429: retrying/rotating the SAME oversized
+            #    request won't help — even a fresh key's account has the same
+            #    per-model cap, so a single request bigger than the whole budget
+            #    fails on every account identically. ────────────────────────
+            is_too_large = any(kw in err_str for kw in (
+                "413", "request too large", "reduce your message size",
+                "tokens per minute", "tpm",
+            ))
+            if is_too_large:
+                logger.error("[%s] Request too large for model's token budget: %s", label, err)
+                raise RuntimeError(
+                    f"📏 **الطلب أكبر من حدود {_PROVIDER} لهذا النموذج (413):**\n\n"
+                    f"`{type(err).__name__}: {err}`\n\n"
+                    "هذا ليس خطأ مصادقة ولا نفاد رصيد — الطلب الواحد أكبر من حصة "
+                    "الرموز/الدقيقة لهذا النموذج تحديداً. الحلول:\n"
+                    "1. أرفق ملفاً أصغر أو الصق جزءاً منه فقط\n"
+                    "2. اكتب `/new` لبدء محادثة أقصر (السياق التراكمي كبير)\n"
+                    "3. بدّل لنموذج بحصة أعلى: `/model google` أو `/model deepseek`"
+                ) from err
 
             # ── Auth errors (HTTP 401/403) — fail immediately, no retry ────
             is_auth_err = any(kw in err_str for kw in (
@@ -1864,12 +1904,13 @@ def worker_node(state: AgentState) -> dict:
         "  scroll_in_window(window_title='...', direction='up'/'down')\n"
     )
 
-    # EQUAL CAPABILITY ACROSS ALL MODELS: every provider gets the SAME full guide
-    # and the SAME bound tool set (capped at 126 in _build_tools_binding). No model
-    # is shortchanged. Token cost is kept in check by the 126-tool cap; Groq's
-    # per-minute throttling is absorbed by the 429 retry/backoff in _safe_llm_invoke.
-    # (Ollama, with a small context, still gets a trimmed tool list — but the same
-    #  guidance — via _select_tools_for_ollama.)
+    # EQUAL CAPABILITY ACROSS ALL MODELS: every provider gets the SAME full guide.
+    # The BOUND tool set is capped per-provider in _build_tools_binding — 126 for
+    # providers with generous token budgets, but far fewer for Ollama (small
+    # context) and Groq (free-tier TPM cap makes 126 tool schemas alone exceed
+    # the per-request limit — see _select_tools_for_groq). This trims what's
+    # SENT per call, not what the agent can do — all 241 tools stay registered
+    # and reachable once auto-corrected/looked-up by name.
     worker_prompt = _core_rules + _extended_tool_guide
 
     system = SystemMessage(content=worker_prompt)

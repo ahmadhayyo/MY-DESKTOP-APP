@@ -2265,10 +2265,27 @@ async def on_message(message: cl.Message) -> None:
                 elif mime and not mime.startswith("text/") and "json" not in mime and "xml" not in mime:
                     file_context += f"\n\n📎 **ملف مرفق: {name}** — المسار: `{path}` (نوع: {mime})"
                 else:
+                    # Cap what's inlined into the message — a large file dumped
+                    # raw here can alone exceed a model's whole per-request token
+                    # budget (e.g. Groq free tier: 12,000 tokens/min for
+                    # llama-3.3-70b-versatile). For anything bigger, give the
+                    # agent the path and let it use read_file (which handles
+                    # large files with its own truncation) instead of forcing
+                    # the whole thing into this one message.
+                    _INLINE_FILE_CAP = 6_000
                     try:
+                        size = os.path.getsize(path)
                         with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                            raw = fh.read(80_000)
-                        file_context += f"\n\n---\n📄 **ملف مرفق: {name}**\n```\n{raw}\n```"
+                            raw = fh.read(_INLINE_FILE_CAP)
+                        if size > _INLINE_FILE_CAP:
+                            file_context += (
+                                f"\n\n---\n📄 **ملف مرفق: {name}** (الحجم: {size:,} حرف — "
+                                f"عُرضت أول {_INLINE_FILE_CAP:,} فقط)\n```\n{raw}\n```\n"
+                                f"⚠️ الملف أكبر من ذلك — استخدم read_file(path='{path}') "
+                                "لقراءته كاملاً أو على أجزاء."
+                            )
+                        else:
+                            file_context += f"\n\n---\n📄 **ملف مرفق: {name}**\n```\n{raw}\n```"
                     except Exception as exc:
                         file_context += f"\n\n❌ تعذرت قراءة '{name}': {exc}"
 
