@@ -128,6 +128,16 @@ MAX_ITERATIONS: int = min(_get_int("MAX_ITERATIONS", 50), 500)
 MAX_HISTORY: int = min(_get_int("MAX_HISTORY", 30), 300)
 PS_TIMEOUT: int = min(_get_int("PS_TIMEOUT", 120), 300)
 
+# ── Agent loop robustness (Phase 1: loop detection + context compaction) ─────
+# LOOP_*: consecutive identical tool calls that trigger a nudge / a hard stop.
+# TOOL_OUTPUT_TOKEN_BUDGET: newest tool outputs kept fully intact within this
+#   rolling token budget; older ones are replaced with a one-line placeholder.
+# PRUNE_MIN_SAVINGS: skip pruning unless it saves at least this many tokens.
+LOOP_WARNING_THRESHOLD: int = min(_get_int("LOOP_WARNING_THRESHOLD", 3), 20)
+LOOP_HALT_THRESHOLD: int = min(_get_int("LOOP_HALT_THRESHOLD", 5), 30)
+TOOL_OUTPUT_TOKEN_BUDGET: int = min(_get_int("TOOL_OUTPUT_TOKEN_BUDGET", 40_000), 200_000)
+PRUNE_MIN_SAVINGS: int = min(_get_int("PRUNE_MIN_SAVINGS", 8_000), 100_000)
+
 # ── Workspace / downloads ───────────────────────────────────────────────────
 DEFAULT_WORKSPACE: Path = Path(_get("DEFAULT_WORKSPACE", str(ROOT_DIR)))
 DESKTOP_DIR: Path = Path(_get("DESKTOP_DIR", str(Path.home() / "Desktop")))

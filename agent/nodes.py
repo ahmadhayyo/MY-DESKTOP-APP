@@ -65,6 +65,9 @@ from config import (
 from core.state import AgentState
 from core.safety import needs_human_approval
 from core.deduplication import is_duplicate_tool_call, is_duplicate_message, record_tool_call
+from core.loop_detection import detect_loop, generate_loop_nudge
+from core.compaction import prune_tool_outputs
+from core.agent_metrics import record_event as _record_metric
 from core.react_parser import build_react_tool_prompt, parse_react_output
 from core.offline import check_internet, filter_offline_tools, get_offline_notice, clear_internet_cache
 from core.key_rotation import get_active_key, rotate_on_rate_limit, pool_status
@@ -943,7 +946,29 @@ def _summarize_old_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
     - Only summarize up to the 30 messages before those (avoid huge summarization)
     - Filter out previous summaries to avoid redundancy
     - Always sanitize the result to remove orphaned ToolMessages
+
+    Before any summarization, old *tool outputs* beyond a rolling token budget
+    are pruned to one-line placeholders (core.compaction). This alone often
+    keeps the context small enough to skip full summarization, and it protects
+    against a single giant tool output (scan/OCR/browser) blowing the window.
     """
+    # ── Rolling tool-output compaction (cheap, idempotent, tool-pair safe) ─────
+    try:
+        messages, _prune = prune_tool_outputs(messages)
+        if _prune.pruned_count:
+            logger.info(
+                "[compaction] pruned %d old tool output(s), saved ~%d tokens",
+                _prune.pruned_count, _prune.tokens_saved,
+            )
+            _record_metric(
+                "compaction",
+                pruned=_prune.pruned_count,
+                tokens_saved=_prune.tokens_saved,
+                total_tool_tokens=_prune.total_tool_output_tokens,
+            )
+    except Exception as _exc:
+        logger.warning("[compaction] skipped: %s", _exc)
+
     if len(messages) <= MAX_HISTORY:
         return _sanitize_messages(messages)
 
@@ -1620,6 +1645,26 @@ def worker_node(state: AgentState) -> dict:
     error_logs = list(state.get("error_logs", []))
     plan       = state.get("plan", [])
 
+    # ── Doom-loop nudge: if recent tool calls are repeating identically, steer ─
+    # the model toward a different approach on THIS call. A halt (5×) is handled
+    # by should_continue; here we catch the earlier warning stage (3×) and inject
+    # a one-off break nudge, sent to the LLM only (not persisted to state).
+    _loop_nudge_msg = None
+    try:
+        _loop_res = detect_loop(state.get("tool_call_history", []))
+        if _loop_res.is_warning:
+            from langchain_core.messages import HumanMessage as _HM
+            _loop_nudge_msg = _HM(content=generate_loop_nudge(_loop_res))
+            logger.warning(
+                "[Worker] Loop warning (%s ×%d) — injecting break nudge.",
+                ",".join(_loop_res.tool_names) or "tool", _loop_res.count,
+            )
+            _record_metric(
+                "loop_warning", tools=_loop_res.tool_names, count=_loop_res.count,
+            )
+    except Exception as _exc:
+        logger.debug("[Worker] loop detection skipped: %s", _exc)
+
     # ── Skip tool execution for pure conversational messages ──────────────────
     if plan and plan[0] == "CONVERSATIONAL_ONLY":
         return {
@@ -1938,6 +1983,10 @@ def worker_node(state: AgentState) -> dict:
             )
         )
         worker_messages = [system, react_system] + messages
+
+    # Append the loop-break nudge as a trailing user turn (LLM input only).
+    if _loop_nudge_msg is not None:
+        worker_messages = worker_messages + [_loop_nudge_msg]
 
     llm_response = _safe_llm_invoke(_get_llm_with_tools, _sanitize_messages(worker_messages), label="Worker")
 
@@ -2834,17 +2883,22 @@ def should_continue(state: AgentState) -> Literal["worker", "__end__"]:
     if skipped_streak >= 2:
         return "__end__"
 
-    # Also: if the LAST 3 tool calls all targeted the same tool, we're looping.
-    # EXCEPTION: read-only exploration tools (read_file, list_dir, recall_facts)
-    # are legitimately called multiple times in sequence during project exploration.
-    _EXPLORATION_TOOLS = {"read_file", "list_dir", "recall_facts", "search_files", "list_memory"}
+    # ── Doom-loop halt: functionally-identical tool calls repeated too often ──
+    # Graded detector (core.loop_detection). Uses name+args fingerprints with
+    # cosmetic fields stripped, so legitimate exploration with DIFFERENT args
+    # (read_file('a') then read_file('b')) does NOT count — only identical
+    # name+args repeats accumulate toward the halt threshold.
     tool_history = state.get("tool_call_history", [])
-    if len(tool_history) >= 3:
-        recent_names = [call.get("name", "") for call in tool_history[-3:]]
-        if (len(set(recent_names)) == 1
-                and recent_names[0]
-                and recent_names[0] not in _EXPLORATION_TOOLS):
-            return "__end__"
+    _loop = detect_loop(tool_history)
+    if _loop.is_halt:
+        logger.warning(
+            "[should_continue] Forcing __end__: doom loop — %s repeated %d× identically.",
+            ",".join(_loop.tool_names) or "tool", _loop.count,
+        )
+        _record_metric(
+            "loop_halt", tools=_loop.tool_names, count=_loop.count,
+        )
+        return "__end__"
 
     # ── Stuck-loop breaker (last resort) ─────────────────────────────────────
     # NOTE: "[OK] Created"/"[OK] Wrote" are intermediate steps in multi-step
