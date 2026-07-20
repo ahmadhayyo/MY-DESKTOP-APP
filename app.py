@@ -1791,6 +1791,7 @@ async def on_message(message: cl.Message) -> None:
             "| الأمر | الوظيفة |\n|---|---|\n"
             "| `/model` | عرض النموذج الحالي والخيارات |\n"
             "| `/model groq` | التبديل إلى Groq (أو deepseek/google/openai/anthropic/ollama) |\n"
+            "| `/keys` | حالة تدوير مفاتيح API (لمن لديه عدة حسابات) |\n"
             "| `/settings` | الإعدادات (MAX_ITERATIONS…) |\n\n"
             "### 🔌 التكاملات\n"
             "| الأمر | الوظيفة |\n|---|---|\n"
@@ -1830,6 +1831,21 @@ async def on_message(message: cl.Message) -> None:
     # ── Control panel command ─────────────────────────────────────────────────
     if user_text.lower().strip() in ("/panel", "/لوحة", "لوحة التحكم", "/controls"):
         await _show_control_panel()
+        return
+
+    # ── Multi-account key rotation status ─────────────────────────────────────
+    if user_text.lower().strip() in ("/keys", "/مفاتيح"):
+        from core.key_rotation import pool_status
+        lines = ["## 🔑 حالة تدوير المفاتيح\n"]
+        for prov in _PROVIDERS.keys():
+            if prov == "ollama":
+                continue
+            lines.append(f"- **{_PROVIDERS[prov]['label']}**: {pool_status(prov)}")
+        lines.append(
+            "\nلإضافة عدة حسابات لمزوّد: أضف `<PROVIDER>_API_KEYS=key1,key2,key3` في `.env` "
+            "(مثال: `GROQ_API_KEYS=...`) ثم أعد تشغيل الوكيل."
+        )
+        await cl.Message(content="\n".join(lines)).send()
         return
 
     # ── Model switch command ──────────────────────────────────────────────────

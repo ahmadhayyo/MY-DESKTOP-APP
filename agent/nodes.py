@@ -67,6 +67,7 @@ from core.safety import needs_human_approval
 from core.deduplication import is_duplicate_tool_call, is_duplicate_message, record_tool_call
 from core.react_parser import build_react_tool_prompt, parse_react_output
 from core.offline import check_internet, filter_offline_tools, get_offline_notice, clear_internet_cache
+from core.key_rotation import get_active_key, rotate_on_rate_limit, pool_status
 from tools.registry import ALL_TOOLS, TOOLS_BY_NAME
 
 _PROVIDER = os.getenv("MODEL_PROVIDER", "google").lower().strip()
@@ -150,11 +151,12 @@ def _build_llm(role: Literal["main", "summarizer"], provider: str | None = None)
     if prov == "google":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
+        api_key = get_active_key("google", "GOOGLE_API_KEY")
         if role == "main":
             model_name = os.getenv("GOOGLE_AGENT_MODEL", "gemini-2.5-flash")
             return ChatGoogleGenerativeAI(
                 model=model_name,
-                google_api_key=os.getenv("GOOGLE_API_KEY"),
+                google_api_key=api_key,
                 temperature=0.0,
                 streaming=True,
                 convert_system_message_to_human=False,
@@ -163,7 +165,7 @@ def _build_llm(role: Literal["main", "summarizer"], provider: str | None = None)
             model_name = os.getenv("GOOGLE_SUMMARIZER_MODEL", "gemini-2.0-flash")
             return ChatGoogleGenerativeAI(
                 model=model_name,
-                google_api_key=os.getenv("GOOGLE_API_KEY"),
+                google_api_key=api_key,
                 temperature=0.0,
                 max_output_tokens=2_048,
             )
@@ -171,10 +173,12 @@ def _build_llm(role: Literal["main", "summarizer"], provider: str | None = None)
     elif prov == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
+        api_key = get_active_key("anthropic", "ANTHROPIC_API_KEY")
         if role == "main":
             model_name = os.getenv("ANTHROPIC_AGENT_MODEL", "claude-sonnet-4-20250514")
             return ChatAnthropic(
                 model=model_name,
+                api_key=api_key,
                 max_tokens=8_192,
                 streaming=True,
             )
@@ -182,13 +186,14 @@ def _build_llm(role: Literal["main", "summarizer"], provider: str | None = None)
             model_name = os.getenv("ANTHROPIC_SUMMARIZER_MODEL", "claude-haiku-4-5-20251001")
             return ChatAnthropic(
                 model=model_name,
+                api_key=api_key,
                 max_tokens=2_048,
             )
 
     elif prov == "openai":
         from langchain_openai import ChatOpenAI
 
-        api_key = os.getenv("OPENAI_API_KEY", "")
+        api_key = get_active_key("openai", "OPENAI_API_KEY")
         if role == "main":
             model_name = os.getenv("OPENAI_AGENT_MODEL", "gpt-4o")
             return ChatOpenAI(
@@ -210,7 +215,7 @@ def _build_llm(role: Literal["main", "summarizer"], provider: str | None = None)
         from langchain_openai import ChatOpenAI
 
         base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-        api_key = os.getenv("DEEPSEEK_API_KEY", "")
+        api_key = get_active_key("deepseek", "DEEPSEEK_API_KEY")
         if role == "main":
             model_name = os.getenv("DEEPSEEK_AGENT_MODEL", "deepseek-chat")
             return ChatOpenAI(
@@ -233,7 +238,7 @@ def _build_llm(role: Literal["main", "summarizer"], provider: str | None = None)
     elif prov == "groq":
         from langchain_groq import ChatGroq
 
-        api_key = os.getenv("GROQ_API_KEY") or ""
+        api_key = get_active_key("groq", "GROQ_API_KEY")
         if role == "main":
             model_name = os.getenv("GROQ_AGENT_MODEL", "llama-3.3-70b-versatile")
             return ChatGroq(
@@ -668,14 +673,30 @@ def _sanitize_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
     return result
 
 
-def _safe_llm_invoke(llm, messages: list[BaseMessage], *, label: str = "LLM") -> AIMessage:
+def _invalidate_llm_cache() -> None:
+    """Drop cached LLM instances so the next _get_*_llm() call rebuilds them
+    (picking up a newly-rotated API key). Called after a key rotation."""
+    global _main_llm, _fast_llm, _llm_with_tools
+    _main_llm = None
+    _fast_llm = None
+    _llm_with_tools = None
+
+
+def _safe_llm_invoke(llm_getter, messages: list[BaseMessage], *, label: str = "LLM") -> AIMessage:
     """
     Invoke an LLM with error recovery and retry logic.
+
+    `llm_getter` is a zero-arg callable (e.g. `_get_main_llm`) — NOT an already
+    -built model — so that after a key rotation we can fetch a FRESH client
+    bound to the new key instead of retrying with the exhausted one.
 
     Retry strategy:
       - Ollama: up to 3 retries with exponential backoff (2s, 4s, 8s) for
         connection/timeout errors since Ollama runs locally and may be slow.
       - Other providers: 1 retry with simplified messages.
+      - Rate limit (429) with a multi-key pool configured (<PROV>_API_KEYS):
+        rotate to the next key and retry immediately, no waiting. Falls back
+        to the wait-based retry once every key in the pool is cooling down.
 
     Returns an AIMessage on success, or a synthetic error AIMessage on failure.
     """
@@ -689,10 +710,16 @@ def _safe_llm_invoke(llm, messages: list[BaseMessage], *, label: str = "LLM") ->
     # Wait the server-suggested delay and retry instead of failing the task.
     rate_attempts = 0
     max_rate_retries = int(os.getenv("RATE_LIMIT_RETRIES", "4"))
+    # Separate, generous cap for key-ROTATION attempts (near-instant, no wait) —
+    # bounded by pool size so it can't spin forever on a bad pool.
+    from core.key_rotation import get_pool as _get_key_pool
+    max_rotate_retries = max(len(_get_key_pool(_PROVIDER)) - 1, 0)
+    rotate_attempts = 0
 
     attempt = 0
     while attempt <= max_retries:
         try:
+            llm = llm_getter() if callable(llm_getter) else llm_getter
             return llm.invoke(messages)
         except Exception as err:
             last_err = err
@@ -703,6 +730,19 @@ def _safe_llm_invoke(llm, messages: list[BaseMessage], *, label: str = "LLM") ->
                 "429", "resource_exhausted", "rate limit", "ratelimit",
                 "too many requests", "quota",
             )) and "limit: 0" not in err_str  # 'limit: 0' = model not free at all
+
+            # First line of defense: rotate to another account's key if we have
+            # one — instant, no waiting, invisible to the user.
+            if is_rate_limit and rotate_attempts < max_rotate_retries:
+                if rotate_on_rate_limit(_PROVIDER):
+                    rotate_attempts += 1
+                    _invalidate_llm_cache()
+                    logger.warning(
+                        "[%s] Key rate-limited — rotated to next key in pool (%d/%d), retrying now.",
+                        label, rotate_attempts, max_rotate_retries,
+                    )
+                    continue
+
             if is_rate_limit and rate_attempts < max_rate_retries:
                 rate_attempts += 1
                 # try to honor the server's retryDelay (e.g. "retryDelay': '20s'")
@@ -1445,7 +1485,7 @@ def planner_node(state: AgentState) -> dict:
         )
 
     system = SystemMessage(content=_PLANNER_SYSTEM + session_ctx)
-    response = _safe_llm_invoke(_get_main_llm(), _sanitize_messages([system] + messages), label="Planner")
+    response = _safe_llm_invoke(_get_main_llm, _sanitize_messages([system] + messages), label="Planner")
     content  = response.content if isinstance(response.content, str) else ""
 
     # ── Detect conversational response ────────────────────────────────────────
@@ -1847,7 +1887,7 @@ def worker_node(state: AgentState) -> dict:
         )
         worker_messages = [system, react_system] + messages
 
-    llm_response = _safe_llm_invoke(_get_llm_with_tools(), _sanitize_messages(worker_messages), label="Worker")
+    llm_response = _safe_llm_invoke(_get_llm_with_tools, _sanitize_messages(worker_messages), label="Worker")
 
     # ── Strip DeepSeek DSML artefacts from message content ───────────────────
     # DeepSeek sometimes leaks <｜｜DSML｜｜tool_calls>...</｜｜DSML｜｜tool_calls>
@@ -1889,7 +1929,7 @@ def worker_node(state: AgentState) -> dict:
         _force_messages = [system] + [_HumanMessage(content=_force_content)]
         if _react_mode and _react_tool_prompt:
             _force_messages = [system, SystemMessage(content=_react_tool_prompt)] + [_HumanMessage(content=_force_content)]
-        _retry_response = _safe_llm_invoke(_get_llm_with_tools(), _force_messages, label="Worker-Retry")
+        _retry_response = _safe_llm_invoke(_get_llm_with_tools, _force_messages, label="Worker-Retry")
         if _react_mode and not (hasattr(_retry_response, "tool_calls") and _retry_response.tool_calls):
             _retry_response = parse_react_output(_retry_response, TOOL_MAP)
         if hasattr(_retry_response, "tool_calls") and _retry_response.tool_calls:
@@ -2620,7 +2660,7 @@ def reviewer_node(state: AgentState) -> dict:
 
     # ONE combined system message — never converted by _sanitize_messages
     system   = SystemMessage(content=_REVIEWER_SYSTEM + _progress_section)
-    response = _safe_llm_invoke(_get_main_llm(), _sanitize_messages([system] + messages), label="Reviewer")
+    response = _safe_llm_invoke(_get_main_llm, _sanitize_messages([system] + messages), label="Reviewer")
 
     # ── Strip verdict prefixes — keep verdict for should_continue() logic
     #    but put the user-friendly summary in a separate clean message ─────────
