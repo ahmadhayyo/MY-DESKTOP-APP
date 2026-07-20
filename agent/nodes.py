@@ -65,7 +65,7 @@ from config import (
 from core.state import AgentState
 from core.safety import needs_human_approval
 from core.deduplication import is_duplicate_tool_call, is_duplicate_message, record_tool_call
-from core.loop_detection import detect_loop, generate_loop_nudge
+from core.loop_detection import detect_loop, detect_error_thrash, generate_loop_nudge
 from core.compaction import prune_tool_outputs
 from core.agent_metrics import record_event as _record_metric
 from core.react_parser import build_react_tool_prompt, parse_react_output
@@ -1651,16 +1651,27 @@ def worker_node(state: AgentState) -> dict:
     # a one-off break nudge, sent to the LLM only (not persisted to state).
     _loop_nudge_msg = None
     try:
-        _loop_res = detect_loop(state.get("tool_call_history", []))
+        _hist = state.get("tool_call_history", [])
+        # Primary: identical-call loop (also has a halt tier in should_continue).
+        _loop_res = detect_loop(_hist)
+        # Secondary (warning-only): same tool retried with varying args while its
+        # results keep failing. Never halts — only enriches guidance.
+        if not _loop_res.is_warning:
+            _loop_res = detect_error_thrash(_hist)
         if _loop_res.is_warning:
             from langchain_core.messages import HumanMessage as _HM
-            _loop_nudge_msg = _HM(content=generate_loop_nudge(_loop_res))
+            _last_err = error_logs[-1] if error_logs else None
+            _loop_nudge_msg = _HM(
+                content=generate_loop_nudge(_loop_res, last_error=_last_err)
+            )
             logger.warning(
-                "[Worker] Loop warning (%s ×%d) — injecting break nudge.",
+                "[Worker] Loop warning (%s, %s ×%d) — injecting break nudge.",
+                _loop_res.reason or "loop",
                 ",".join(_loop_res.tool_names) or "tool", _loop_res.count,
             )
             _record_metric(
-                "loop_warning", tools=_loop_res.tool_names, count=_loop_res.count,
+                "loop_warning", reason=_loop_res.reason,
+                tools=_loop_res.tool_names, count=_loop_res.count,
             )
     except Exception as _exc:
         logger.debug("[Worker] loop detection skipped: %s", _exc)

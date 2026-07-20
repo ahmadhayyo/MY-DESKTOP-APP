@@ -13,7 +13,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 
-from core.loop_detection import detect_loop, generate_loop_nudge  # noqa: E402
+from core.loop_detection import (  # noqa: E402
+    detect_loop,
+    detect_error_thrash,
+    generate_loop_nudge,
+)
 from core.compaction import prune_tool_outputs, estimate_tokens  # noqa: E402
 
 
@@ -74,6 +78,69 @@ class LoopDetectionTests(unittest.TestCase):
     def test_unhashable_args_do_not_crash(self):
         hist = [{"name": "t", "args": {"nested": {"a": [1, 2]}}} for _ in range(5)]
         self.assertEqual(detect_loop(hist).severity, "halt")
+
+
+class ErrorThrashTests(unittest.TestCase):
+    def test_thrash_with_failing_results_warns(self):
+        # Same tool, DIFFERENT args, results keep failing -> warning (never halt).
+        hist = [
+            {"name": "edit_file_replace", "args": {"old_text": "a"}, "result": "❌ Text not found"},
+            {"name": "edit_file_replace", "args": {"old_text": "b"}, "result": "❌ Text not found"},
+            {"name": "edit_file_replace", "args": {"old_text": "c"}, "result": "Error: not found"},
+            {"name": "edit_file_replace", "args": {"old_text": "d"}, "result": "❌ Text not found"},
+        ]
+        r = detect_error_thrash(hist)
+        self.assertEqual(r.severity, "warning")
+        self.assertEqual(r.reason, "error_thrash")
+        self.assertEqual(r.tool_names, ["edit_file_replace"])
+
+    def test_thrash_never_halts(self):
+        hist = [
+            {"name": "edit_file_replace", "args": {"old_text": str(i)}, "result": "❌ failed"}
+            for i in range(10)
+        ]
+        # Even with 10 failing calls, error-thrash stays at warning severity.
+        self.assertEqual(detect_error_thrash(hist).severity, "warning")
+
+    def test_successful_results_do_not_thrash(self):
+        hist = [
+            {"name": "write_file", "args": {"path": f"f{i}"}, "result": "[OK] Wrote"}
+            for i in range(4)
+        ]
+        self.assertEqual(detect_error_thrash(hist).severity, "none")
+
+    def test_identical_calls_left_to_detect_loop(self):
+        # All-identical is detect_loop's job, not error-thrash.
+        hist = [
+            {"name": "run_cmd", "args": {"command": "x"}, "result": "❌ error"}
+            for _ in range(4)
+        ]
+        self.assertEqual(detect_error_thrash(hist).severity, "none")
+
+    def test_exploration_tools_excluded(self):
+        hist = [
+            {"name": "read_file", "args": {"path": f"f{i}"}, "result": "not found"}
+            for i in range(4)
+        ]
+        self.assertEqual(detect_error_thrash(hist).severity, "none")
+
+    def test_mixed_tools_do_not_thrash(self):
+        hist = [
+            {"name": "edit_file_replace", "args": {"old_text": "a"}, "result": "❌ failed"},
+            {"name": "run_cmd", "args": {"command": "x"}, "result": "❌ failed"},
+            {"name": "edit_file_replace", "args": {"old_text": "b"}, "result": "❌ failed"},
+            {"name": "run_cmd", "args": {"command": "y"}, "result": "❌ failed"},
+        ]
+        self.assertEqual(detect_error_thrash(hist).severity, "none")
+
+    def test_nudge_includes_last_error(self):
+        r = detect_error_thrash([
+            {"name": "edit_file_replace", "args": {"old_text": str(i)}, "result": "❌ Text not found"}
+            for i in range(4)
+        ])
+        nudge = generate_loop_nudge(r, last_error="Text not found: 'def foo'")
+        self.assertIn("REPEATED FAILURE", nudge)
+        self.assertIn("Text not found: 'def foo'", nudge)
 
 
 class CompactionTests(unittest.TestCase):

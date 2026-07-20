@@ -44,6 +44,20 @@ except Exception:  # pragma: no cover - config import guard
 # functional arguments are identical. Stripped before fingerprinting.
 _COSMETIC_FIELDS = frozenset({"brief", "explanation", "thought", "reasoning", "_note"})
 
+# Read-only exploration tools legitimately repeat (with different args) during
+# project discovery, so they are excluded from the error-thrash signal.
+_EXPLORATION_TOOLS = frozenset(
+    {"read_file", "list_dir", "recall_facts", "search_files", "list_memory", "recall"}
+)
+
+# Substrings in a tool result that indicate the call failed. Used only by the
+# WARNING-tier error-thrash detector — never by the halt path.
+_ERROR_MARKERS = (
+    "❌", "error", "failed", "not found", "text not found", "traceback",
+    "exception", "cannot access", "denied", "no such", "does not exist",
+    "[tool result missing", "invalid",
+)
+
 LoopSeverity = Literal["none", "warning", "halt"]
 
 
@@ -131,16 +145,84 @@ def detect_loop(
     )
 
 
-def generate_loop_nudge(result: LoopResult) -> str:
+def _is_error_result(result: object) -> bool:
+    """True if a tool result string looks like a failure."""
+    if not result:
+        return False
+    text = str(result).lower()
+    return any(marker in text for marker in _ERROR_MARKERS)
+
+
+def detect_error_thrash(
+    tool_history: list[dict] | None,
+    *,
+    window: int = 4,
+    min_errors: int = 2,
+) -> LoopResult:
+    """Detect the model retrying ONE non-exploration tool with varying args while
+    its results keep failing (e.g. edit_file_replace missing its target text).
+
+    This is a WARNING-only signal — it never halts. The point is to inject a
+    "read the error and change approach" nudge, not to stop a legitimate task.
+    Requires the trailing ``window`` calls to target the same non-exploration
+    tool with at least ``min_errors`` failing results among them, and the args
+    to NOT be all identical (that case is already covered by :func:`detect_loop`).
+    """
+    if not tool_history or len(tool_history) < window:
+        return LoopResult()
+
+    tail = tool_history[-window:]
+    names = {e.get("name") for e in tail if isinstance(e, dict)}
+    if len(names) != 1:
+        return LoopResult()
+    (name,) = tuple(names)
+    if not name or name in _EXPLORATION_TOOLS:
+        return LoopResult()
+
+    fingerprints = {_fingerprint(e) for e in tail}
+    if len(fingerprints) == 1:
+        # All identical — detect_loop already owns this case.
+        return LoopResult()
+
+    error_count = sum(1 for e in tail if _is_error_result(e.get("result")))
+    if error_count < min_errors:
+        return LoopResult()
+
+    return LoopResult(
+        severity="warning",
+        tool_names=[name],
+        count=window,
+        reason="error_thrash",
+    )
+
+
+def generate_loop_nudge(result: LoopResult, last_error: str | None = None) -> str:
     """Build a guidance message to steer the model out of a detected loop.
 
     Written in Arabic (the agent's primary working language) with an English
-    bracket tag so it is unmistakable in logs and to the model.
+    bracket tag so it is unmistakable in logs and to the model. When
+    ``last_error`` is provided, it is surfaced so the model can react to the
+    concrete failure instead of guessing.
     """
     tools = "، ".join(result.tool_names) if result.tool_names else "نفس الأداة"
+    error_line = (
+        f"\nآخر خطأ مسجّل:\n{str(last_error)[:400]}\n" if last_error else ""
+    )
+
+    if result.reason == "error_thrash":
+        return (
+            f"[REPEATED FAILURE] استدعيت ({tools}) {result.count} مرات بوسائط مختلفة "
+            f"لكنها تفشل تكراراً.{error_line}"
+            f"توقّف عن التخمين وغيّر النهج جذرياً:\n"
+            f"- إن كنت تعدّل ملفاً وتفشل مطابقة النص، أعد قراءة الملف بالكامل "
+            f"(read_file) وانسخ النص المستهدف حرفياً قبل التعديل.\n"
+            f"- تحقّق من المسار والصلاحيات وصياغة الأمر.\n"
+            f"- إن استمر الفشل، لخّص السبب واطلب توجيهاً من المستخدم بدل التكرار."
+        )
+
     return (
         f"[LOOP DETECTED] لقد استدعيت ({tools}) {result.count} مرات متتالية بنفس "
-        f"الوسائط تماماً دون تقدّم حقيقي. أنت عالق في حلقة.\n"
+        f"الوسائط تماماً دون تقدّم حقيقي. أنت عالق في حلقة.{error_line}"
         f"يجب أن تُغيّر النهج الآن:\n"
         f"- إن كان أمرٌ أو أداةٌ تفشل تكراراً، اقرأ رسالة الخطأ بدقّة وعدّل استراتيجيتك.\n"
         f"- جرّب وسائط مختلفة، أو أداة مختلفة، أو طريقة مختلفة كلياً لتحقيق الهدف.\n"
