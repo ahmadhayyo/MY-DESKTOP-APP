@@ -83,7 +83,7 @@ def compile_graph():
     builder.add_conditional_edges(
         "reviewer",
         should_continue,
-        {"worker": "worker", "__end__": END},
+        {"worker": "worker", "planner": "planner", "__end__": END},
     )
 
     _COMPILED_GRAPH = builder.compile(checkpointer=_build_checkpointer())

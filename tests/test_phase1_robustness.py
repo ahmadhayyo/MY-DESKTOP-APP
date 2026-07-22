@@ -19,6 +19,11 @@ from core.loop_detection import (  # noqa: E402
     generate_loop_nudge,
 )
 from core.compaction import prune_tool_outputs, estimate_tokens  # noqa: E402
+from core.verify_gate import verification_pending, generate_verify_nudge  # noqa: E402
+from core.verify_gate import (  # noqa: E402
+    visual_verification_pending, generate_visual_nudge,
+)
+from core import todo as _todo_mod  # noqa: E402,F401  (exercised in TodoStoreTests)
 
 
 def _hist(name, args, n):
@@ -227,6 +232,317 @@ class CompactionTests(unittest.TestCase):
         out, res = prune_tool_outputs(msgs)
         self.assertEqual(res.skip_reason, "no-tool-outputs")
         self.assertIs(out, msgs)
+
+
+class VerifyGateTests(unittest.TestCase):
+    """core/verify_gate.py — enforce the 'verify' leg of explore→edit→verify."""
+
+    def _edit(self, path, result="[OK] edited"):
+        return {"name": "edit_file_replace", "args": {"path": path}, "result": result}
+
+    def _run(self, result="ok"):
+        return {"name": "run_python", "args": {"code": "x"}, "result": result}
+
+    def test_empty_history_not_pending(self):
+        self.assertFalse(verification_pending([]).pending)
+        self.assertFalse(verification_pending(None).pending)
+
+    def test_edit_without_run_is_pending(self):
+        g = verification_pending([self._edit("main.py")])
+        self.assertTrue(g.pending)
+        self.assertEqual(g.file, "main.py")
+
+    def test_run_after_edit_clears_even_if_run_failed(self):
+        # The gate guarantees a run HAPPENS, not that it passes.
+        hist = [self._edit("main.py"), self._run(result="❌ boom")]
+        self.assertFalse(verification_pending(hist).pending)
+
+    def test_failed_edit_does_not_arm(self):
+        hist = [self._edit("a.py", result="❌ Text not found")]
+        self.assertFalse(verification_pending(hist).pending)
+
+    def test_non_runnable_file_does_not_arm(self):
+        for path in ("notes.md", "data.json", "page.html", "style.css"):
+            self.assertFalse(
+                verification_pending([self._edit(path)]).pending, path
+            )
+
+    def test_blocked_edit_prefix_excluded(self):
+        hist = [{"name": "BLOCKED:edit_file_replace",
+                 "args": {"path": "a.py"}, "result": "⛔ blocked"}]
+        self.assertFalse(verification_pending(hist).pending)
+
+    def test_latest_edit_wins(self):
+        hist = [
+            self._edit("a.py"), self._run(),          # a.py verified
+            self._edit("b.py"),                        # b.py not verified
+        ]
+        g = verification_pending(hist)
+        self.assertTrue(g.pending)
+        self.assertEqual(g.file, "b.py")
+
+    def test_disabled_via_env(self):
+        os.environ["HAYO_VERIFY_GATE"] = "0"
+        try:
+            self.assertFalse(verification_pending([self._edit("main.py")]).pending)
+        finally:
+            os.environ.pop("HAYO_VERIFY_GATE", None)
+
+    def test_nudge_mentions_file(self):
+        g = verification_pending([self._edit("app/server.py")])
+        self.assertIn("app/server.py", generate_verify_nudge(g))
+
+
+class VisualGateTests(unittest.TestCase):
+    """core/verify_gate.py — the visual 'look at it' leg (build→run→SEE→fix).
+
+    visual_is_enabled() needs a vision provider; force one on via a dummy key so
+    the gate logic is exercised deterministically regardless of the real .env.
+    """
+
+    def setUp(self):
+        self._saved = {k: os.environ.get(k) for k in
+                       ("GOOGLE_API_KEY", "HAYO_VISION_PROVIDER", "HAYO_VISUAL_GATE")}
+        os.environ["GOOGLE_API_KEY"] = "dummy-key-for-tests"
+        os.environ["HAYO_VISION_PROVIDER"] = "google"
+        os.environ.pop("HAYO_VISUAL_GATE", None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _run_gui(self, code="import tkinter as tk; tk.Tk().mainloop()", result="ok"):
+        return {"name": "run_python", "args": {"code": code}, "result": result}
+
+    def _run_cli(self, code="print(2+2)", result="4"):
+        return {"name": "run_python", "args": {"code": code}, "result": result}
+
+    def _analyze(self, result="[VISION:google] looks fine"):
+        return {"name": "analyze_screen", "args": {"question": "ok?"}, "result": result}
+
+    def test_empty_not_pending(self):
+        self.assertFalse(visual_verification_pending([]).pending)
+        self.assertFalse(visual_verification_pending(None).pending)
+
+    def test_gui_run_without_look_is_pending(self):
+        self.assertTrue(visual_verification_pending([self._run_gui()]).pending)
+
+    def test_cli_run_does_not_arm(self):
+        # A plain compute script is not visual — no look required.
+        self.assertFalse(visual_verification_pending([self._run_cli()]).pending)
+
+    def test_analyze_after_run_clears(self):
+        hist = [self._run_gui(), self._analyze()]
+        self.assertFalse(visual_verification_pending(hist).pending)
+
+    def test_failed_gui_run_does_not_arm(self):
+        hist = [self._run_gui(result="❌ ImportError")]
+        self.assertFalse(visual_verification_pending(hist).pending)
+
+    def test_web_server_signal_arms(self):
+        hist = [{"name": "run_cmd",
+                 "args": {"command": "streamlit run app.py"}, "result": "ok"}]
+        self.assertTrue(visual_verification_pending(hist).pending)
+
+    def test_html_run_arms(self):
+        hist = [{"name": "run_script",
+                 "args": {"path": "site/index.html"}, "result": "ok"}]
+        self.assertTrue(visual_verification_pending(hist).pending)
+
+    def test_build_desktop_app_arms(self):
+        hist = [{"name": "build_desktop_app",
+                 "args": {"path": "app.py"}, "result": "[OK] built"}]
+        self.assertTrue(visual_verification_pending(hist).pending)
+
+    def test_latest_run_wins(self):
+        hist = [self._run_gui(), self._analyze(),          # first GUI seen
+                {"name": "run_cmd", "args": {"command": "flask run"}, "result": "ok"}]
+        self.assertTrue(visual_verification_pending(hist).pending)
+
+    def test_disabled_via_env(self):
+        os.environ["HAYO_VISUAL_GATE"] = "0"
+        self.assertFalse(visual_verification_pending([self._run_gui()]).pending)
+
+    def test_dormant_without_vision_provider(self):
+        # No vision provider available → gate stays dormant even for a GUI run.
+        # Mock the provider check so the test is independent of the real .env
+        # (which may legitimately have a vision key configured).
+        import core.vision_analyze as _va
+        from unittest.mock import patch
+        with patch.object(_va, "available_vision_providers", return_value=[]):
+            self.assertFalse(visual_verification_pending([self._run_gui()]).pending)
+
+    def test_nudge_mentions_tools(self):
+        g = visual_verification_pending([self._run_gui()])
+        nudge = generate_visual_nudge(g)
+        self.assertIn("analyze_screen", nudge)
+
+
+class TodoStoreTests(unittest.TestCase):
+    """core/todo.py — the live self-updating task checklist."""
+
+    def setUp(self):
+        from core import todo
+        self.todo = todo
+        self.tid = "test-task"
+        todo.clear_todos(self.tid)
+
+    def tearDown(self):
+        self.todo.clear_todos(self.tid)
+
+    def test_write_and_progress(self):
+        self.todo.write_todos(self.tid, [
+            {"id": "1", "content": "a", "status": "completed"},
+            {"id": "2", "content": "b", "status": "in_progress"},
+            {"id": "3", "content": "c", "status": "pending"},
+        ])
+        self.assertEqual(self.todo.progress(self.tid), (1, 3))
+
+    def test_status_only_update_merges_keeps_content(self):
+        self.todo.write_todos(self.tid, [
+            {"id": "1", "content": "build", "status": "pending"},
+            {"id": "2", "content": "test", "status": "pending"},
+        ])
+        # partial: no content → must merge, not wipe
+        self.todo.write_todos(self.tid, [{"id": "1", "status": "completed"}])
+        items = {t["id"]: t for t in self.todo.get_todos(self.tid)}
+        self.assertEqual(items["1"]["content"], "build")
+        self.assertEqual(items["1"]["status"], "completed")
+        self.assertEqual(items["2"]["content"], "test")  # untouched
+
+    def test_replace_semantics_when_full(self):
+        self.todo.write_todos(self.tid, [{"id": "1", "content": "old", "status": "pending"}])
+        self.todo.write_todos(self.tid, [
+            {"id": "9", "content": "new", "status": "pending"}], merge=False)
+        ids = [t["id"] for t in self.todo.get_todos(self.tid)]
+        self.assertEqual(ids, ["9"])
+
+    def test_status_normalisation(self):
+        self.todo.write_todos(self.tid, [
+            {"id": "1", "content": "x", "status": "doing"},
+            {"id": "2", "content": "y", "status": "done"},
+        ])
+        st = {t["id"]: t["status"] for t in self.todo.get_todos(self.tid)}
+        self.assertEqual(st["1"], "in_progress")
+        self.assertEqual(st["2"], "completed")
+
+    def test_all_complete(self):
+        self.todo.write_todos(self.tid, [
+            {"id": "1", "content": "x", "status": "completed"},
+            {"id": "2", "content": "y", "status": "cancelled"},
+        ])
+        self.assertTrue(self.todo.all_complete(self.tid))  # cancelled ignored
+
+    def test_render_contains_content(self):
+        self.todo.write_todos(self.tid, [{"id": "1", "content": "احفظ الملف", "status": "pending"}])
+        self.assertIn("احفظ الملف", self.todo.render(self.tid))
+
+    def test_render_markdown_strikes_completed(self):
+        self.todo.write_todos(self.tid, [
+            {"id": "1", "content": "done item", "status": "completed"},
+            {"id": "2", "content": "active item", "status": "in_progress"},
+            {"id": "3", "content": "todo item", "status": "pending"},
+        ])
+        md = self.todo.render_markdown(self.tid)
+        self.assertIn("~~done item~~", md)          # struck through
+        self.assertIn("**active item**", md)         # bold in-progress
+        self.assertIn("todo item", md)
+        self.assertIn("1/3", md)                     # count header
+
+    def test_active_task_tracks_last(self):
+        self.todo.set_current_task("some-active-task")
+        self.assertEqual(self.todo.active_task(), "some-active-task")
+
+    def test_context_var_binds_default_task(self):
+        self.todo.set_current_task("ctx-task")
+        self.todo.clear_todos("ctx-task")
+        self.todo.write_todos("", [{"id": "1", "content": "z", "status": "pending"}])
+        self.assertEqual(len(self.todo.get_todos("")), 1)
+        self.todo.clear_todos("ctx-task")
+
+
+class BudgetGuardTests(unittest.TestCase):
+    """core/budget.py — per-task token spend cap."""
+
+    def setUp(self):
+        from core import budget
+        self.budget = budget
+        self._saved = os.environ.get("HAYO_TASK_TOKEN_BUDGET")
+        os.environ["HAYO_TASK_TOKEN_BUDGET"] = "1000"
+        budget.reset("bt")
+
+    def tearDown(self):
+        self.budget.reset("bt")
+        if self._saved is None:
+            os.environ.pop("HAYO_TASK_TOKEN_BUDGET", None)
+        else:
+            os.environ["HAYO_TASK_TOKEN_BUDGET"] = self._saved
+
+    def test_accumulates_and_reports_remaining(self):
+        self.budget.add_tokens("bt", 300)
+        self.assertEqual(self.budget.remaining("bt"), 700)
+        self.assertFalse(self.budget.over_budget("bt"))
+
+    def test_halts_when_exceeded(self):
+        self.budget.add_tokens("bt", 1200)
+        self.assertTrue(self.budget.over_budget("bt"))
+
+    def test_reset_clears(self):
+        self.budget.add_tokens("bt", 1200)
+        self.budget.reset("bt")
+        self.assertEqual(self.budget.used("bt"), 0)
+        self.assertFalse(self.budget.over_budget("bt"))
+
+    def test_disabled_when_zero(self):
+        os.environ["HAYO_TASK_TOKEN_BUDGET"] = "0"
+        self.budget.add_tokens("bt", 99999)
+        self.assertFalse(self.budget.over_budget("bt"))
+        self.assertFalse(self.budget.is_enabled())
+
+    def test_add_text_estimates_tokens(self):
+        before = self.budget.used("bt")
+        self.budget.add_text("bt", "x" * 400)  # ~100 tokens at chars/4
+        self.assertGreater(self.budget.used("bt"), before)
+
+
+class TerminalSessionTests(unittest.TestCase):
+    """core/terminal_session.py — persistent stateful shell (Windows)."""
+
+    def setUp(self):
+        from core import terminal_session
+        self.ts = terminal_session
+        self.sid = "unittest"
+        self.ts.reset_session(self.sid)
+
+    def tearDown(self):
+        self.ts.reset_session(self.sid)
+
+    def test_basic_command(self):
+        r = self.ts.run_in_session("echo hi", session_id=self.sid, timeout=15)
+        self.assertEqual(r["output"], "hi")
+        self.assertEqual(r["exit_code"], 0)
+        self.assertFalse(r["timed_out"])
+
+    def test_state_persists_between_calls(self):
+        self.ts.run_in_session("set UT_VAR=persisted", session_id=self.sid, timeout=15)
+        r = self.ts.run_in_session("echo %UT_VAR%", session_id=self.sid, timeout=15)
+        self.assertEqual(r["output"], "persisted")
+
+    def test_exit_code_captured(self):
+        r = self.ts.run_in_session("cmd /c exit 5", session_id=self.sid, timeout=15)
+        self.assertEqual(r["exit_code"], 5)
+
+    def test_timeout_does_not_hang(self):
+        # A 30s ping with a 2s timeout must return timed_out quickly, not block.
+        import time as _t
+        start = _t.time()
+        r = self.ts.run_in_session("ping -n 30 127.0.0.1", session_id=self.sid, timeout=2)
+        self.assertTrue(r["timed_out"])
+        self.assertLess(_t.time() - start, 12)  # generous bound; must not hang 30s
+        self.ts.reset_session(self.sid)  # wedged session cleaned
 
 
 if __name__ == "__main__":

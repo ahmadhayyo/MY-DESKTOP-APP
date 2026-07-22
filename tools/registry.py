@@ -385,14 +385,34 @@ def _load_vision():
         screen_read_text, screen_find_text, screen_find_and_click,
         screen_wait_for_text, screen_get_pixel_color,
         screen_capture_region, screen_compare_changes,
+        analyze_screen, analyze_image,
     )
     return [
         screen_read_text, screen_find_text, screen_find_and_click,
         screen_wait_for_text, screen_get_pixel_color,
         screen_capture_region, screen_compare_changes,
+        analyze_screen, analyze_image,
     ]
 
 _import_category("vision", _load_vision)
+
+# ═══════════════════════════════════════════════════════════
+# TODO — live self-updating task checklist (Claude-Code style)
+# ═══════════════════════════════════════════════════════════
+def _load_todo():
+    from tools.todo_tools import todo_write, todo_read
+    return [todo_write, todo_read]
+
+_import_category("todo", _load_todo)
+
+# ═══════════════════════════════════════════════════════════
+# TERMINAL SESSION — persistent, stateful shell (cwd/env/venv persist)
+# ═══════════════════════════════════════════════════════════
+def _load_terminal():
+    from tools.terminal_tools import terminal_run, terminal_reset
+    return [terminal_run, terminal_reset]
+
+_import_category("terminal", _load_terminal)
 
 # ═══════════════════════════════════════════════════════════
 # WINDOWS POWER — Deep Windows OS control

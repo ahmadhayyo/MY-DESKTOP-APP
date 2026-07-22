@@ -263,3 +263,65 @@ def screen_compare_changes(
             return f"[OK] Significant change detected ({change_pct:.1f}% of pixels changed) — page/app has updated."
     except Exception as exc:
         return f"[ERROR] screen_compare_changes: {exc}"
+
+
+# ── TRUE VISION: send the image to a multimodal model and reason about it ─────
+
+@tool
+def analyze_screen(
+    question: Annotated[str, "What to look for / ask about the screen. e.g. 'هل ظهر نموذج تسجيل الدخول صحيحاً؟ هل توجد أخطاء بصرية؟'"] = "",
+    region: Annotated[str, "Optional 'x,y,w,h' to analyze only part of the screen. Empty = full screen."] = "",
+) -> str:
+    """See and VISUALLY analyze the current screen with a real vision model.
+
+    Unlike screen_read_text (OCR — text only), this actually *looks* at the
+    screenshot: layout, colours, icons, whether a UI is rendered correctly,
+    error dialogs, visual bugs. Use it to verify a GUI/web app you just built or
+    changed ("build → run → screenshot → look → fix"), or to understand any
+    non-textual visual state. Falls back across vision providers automatically.
+    """
+    try:
+        from core.vision_analyze import analyze as _vision_analyze
+
+        reg = None
+        if region and region.strip():
+            try:
+                parts = [int(p.strip()) for p in region.split(",")]
+                if len(parts) == 4:
+                    reg = tuple(parts)
+            except Exception:
+                return "[ERROR] region must be 'x,y,w,h' integers, e.g. '0,0,800,600'."
+
+        img = _take_screenshot_pil(reg)
+        result = _vision_analyze(img, question)
+        if not result.ok:
+            return result.text
+        tag = f"[VISION:{result.provider}/{result.model}]"
+        return f"{tag}\n{result.text}"
+    except Exception as exc:
+        return f"[ERROR] analyze_screen: {exc}"
+
+
+@tool
+def analyze_image(
+    path: Annotated[str, "Path to an image file (PNG/JPG) to analyze visually."],
+    question: Annotated[str, "What to ask about the image. Empty = general description."] = "",
+) -> str:
+    """Visually analyze an image FILE with a real vision model.
+
+    Same true-vision capability as analyze_screen, but for a saved image (a
+    screenshot the agent captured earlier, a design mockup, a photo, a chart,
+    etc.). Reads layout, content, colours, text, and any visual problems.
+    """
+    try:
+        from pathlib import Path as _P
+        if not _P(path).exists():
+            return f"[ERROR] الملف غير موجود: {path}"
+        from core.vision_analyze import analyze as _vision_analyze
+        result = _vision_analyze(path, question)
+        if not result.ok:
+            return result.text
+        tag = f"[VISION:{result.provider}/{result.model}]"
+        return f"{tag}\n{result.text}"
+    except Exception as exc:
+        return f"[ERROR] analyze_image: {exc}"

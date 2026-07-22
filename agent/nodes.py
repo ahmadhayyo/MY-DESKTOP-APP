@@ -67,6 +67,10 @@ from core.safety import needs_human_approval
 from core.deduplication import is_duplicate_tool_call, is_duplicate_message, record_tool_call
 from core.loop_detection import detect_loop, detect_error_thrash, generate_loop_nudge
 from core.compaction import prune_tool_outputs
+from core.verify_gate import (
+    verification_pending, generate_verify_nudge,
+    visual_verification_pending, generate_visual_nudge,
+)
 from core.agent_metrics import record_event as _record_metric
 from core.react_parser import build_react_tool_prompt, parse_react_output
 from core.offline import check_internet, filter_offline_tools, get_offline_notice, clear_internet_cache
@@ -1474,6 +1478,123 @@ def _extract_workspace(messages: list, current_workspace: str) -> str:
     return current_workspace
 
 
+# Short user messages that mean "keep going", not "start a new task". Matched
+# only when the message is essentially JUST the cue (so a real new request that
+# merely contains the word "continue" is not misread as a resume).
+_CONTINUATION_CUES = (
+    "اكمل", "أكمل", "كمل", "كمّل", "أكمِل", "اكمل القراءة", "تابع", "استمر",
+    "كمل المهمة", "أكمل عملك", "continue", "go on", "keep going", "resume",
+    "proceed", "carry on", "next",
+)
+
+
+def _is_continuation_cue(text: str) -> bool:
+    """True if `text` is a short 'keep going' message rather than a new task."""
+    if not text:
+        return False
+    t = str(text).strip().lower()
+    # strip trailing punctuation/emoji-ish chars
+    t = t.strip(" .!؟?…\n\t").strip()
+    if len(t) > 25:  # a real new request is longer than a bare cue
+        return False
+    for cue in _CONTINUATION_CUES:
+        c = cue.lower()
+        if t == c or t.startswith(c) or t.endswith(c):
+            return True
+    return False
+
+
+# Action verbs that mean "do something on the computer" (a TASK, not chat).
+# If the message contains any of these, it is NOT routed to the fast chat path.
+_TASK_VERBS = (
+    "افتح", "اقرأ", "أنشئ", "انشئ", "شغّل", "شغل", "نفّذ", "نفذ", "حمّل", "حمل",
+    "نزّل", "نزل", "ابنِ", "ابن", "عدّل", "عدل", "أصلح", "اصلح", "صحّح", "احذف",
+    "انقل", "انسخ", "حلّل", "حلل", "ادرس", "راجع", "افحص", "ابحث", "جد", "اكتب",
+    "صمّم", "صمم", "ثبّت", "ثبت", "اعمل", "سوّي", "سوي", "طبّق", "جهّز", " رتّب",
+    "افتحي", "شغّلي", "اصلحي",
+    "open", "read", "create", "run", "execute", "build", "fix", "download",
+    "edit", "delete", "move", "copy", "analyze", "analyse", "study", "review",
+    "scan", "search", "find", "write", "design", "install", "make", "list",
+    "refactor", "debug", "test", "compile", "deploy", "generate",
+)
+
+# Cheap direct-answer persona for the fast conversational path (small prompt =
+# fast + reliable, unlike routing chat through the 600-line planner prompt).
+_CHAT_SYSTEM = (
+    "أنت HAYO، وكيل ذكي ودود يعمل على جهاز المستخدم. أجب مباشرةً وبإيجاز على رسالة "
+    "المستخدم بنفس لغته (عربي/إنجليزي). هذه محادثة عادية لا تحتاج أدوات — لا تكتب خططاً "
+    "ولا خطوات، فقط ردّ طبيعي مباشر كما يفعل مساعد محترف."
+)
+
+
+def _looks_conversational(text: str) -> bool:
+    """Deterministic fast-path: is this plain chat (answer instantly) not a task?
+
+    True for greetings, thanks, and short questions that contain NO action verb.
+    A message with any task verb (افتح/أصلح/حلّل/open/fix/analyze…) is a task and
+    returns False so it goes through normal planning.
+    """
+    if not text:
+        return False
+    t = str(text).strip().lower()
+    if not t:
+        return False
+    # An explicit action verb ⇒ it's a task, never fast-chat.
+    if any(v.strip().lower() in t for v in _TASK_VERBS):
+        return False
+    # Obvious chat openers/closers.
+    _CHAT_MARKERS = (
+        "مرحبا", "أهلا", "اهلا", "السلام", "هاي", "صباح", "مساء", "كيف حالك",
+        "شكرا", "شكراً", "أحسنت", "احسنت", "ممتاز", "من أنت", "من انت",
+        "ما قدراتك", "ماذا تستطيع", "عرّف", "عرف نفسك", "ما اسمك",
+        "hi", "hello", "hey", "thanks", "thank you", "who are you",
+        "what can you do", "how are you", "good morning", "good evening",
+    )
+    if any(m in t for m in _CHAT_MARKERS):
+        return True
+    # A short question with no action verb and no file path ⇒ treat as chat.
+    _looks_pathy = any(s in t for s in ("\\", "/", ".py", ".exe", ".js", "c:"))
+    if not _looks_pathy and len(t) <= 60 and (t.endswith("؟") or t.endswith("?")):
+        return True
+    return False
+
+
+_READ_TOOLS = {"read_file", "read_file_lines", "read_files", "list_dir", "list_directory"}
+
+
+def _already_read_paths(messages: list) -> list[str]:
+    """Files/dirs already read in THIS conversation (from AIMessage tool_calls).
+
+    Used to tell the planner/worker not to re-read the whole project on a
+    follow-up — their contents are already in the conversation above.
+    """
+    seen: list[str] = []
+    for m in messages:
+        if not isinstance(m, AIMessage):
+            continue
+        for tc in getattr(m, "tool_calls", []) or []:
+            name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
+            if name not in _READ_TOOLS:
+                continue
+            args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+            if isinstance(args, dict):
+                for k in ("path", "file", "file_path", "filepath", "target", "directory"):
+                    v = args.get(k)
+                    if v and str(v) not in seen:
+                        seen.append(str(v))
+    return seen
+
+
+def _plan_is_done(plan: list, completed: list) -> bool:
+    """Best-effort: has the worker reached the end of the plan?"""
+    if not plan:
+        return True
+    # completed_steps accumulates a mix of worker step labels + review markers;
+    # count only genuine step advances (not '[Review:...]' entries).
+    done_steps = sum(1 for c in completed if not str(c).startswith("[Review"))
+    return done_steps >= len(plan)
+
+
 def planner_node(state: AgentState) -> dict:
     """
     Analyses the user's latest request and produces a numbered execution plan.
@@ -1519,6 +1640,83 @@ def planner_node(state: AgentState) -> dict:
             pass
 
     completed = state.get("completed_steps", [])
+
+    # ── Continuation short-circuit: "اكمل"/"continue" must RESUME, not restart ─
+    # Without this, a bare "اكمل" re-enters the planner which resets progress and
+    # re-reads the whole project from scratch. If the latest user message is just
+    # a "keep going" cue and there is an existing, unfinished plan, preserve the
+    # plan + completed steps + task_id (so the live todos persist) and hand back
+    # to the worker to continue exactly where it stopped.
+    _latest_human = ""
+    for _m in reversed(state.get("messages", [])):
+        if isinstance(_m, HumanMessage):
+            _latest_human = _m.content if isinstance(_m.content, str) else ""
+            break
+    _prev_plan = state.get("plan", [])
+    _prev_task = state.get("task_id", "")
+    if (
+        _is_continuation_cue(_latest_human)
+        and _prev_plan
+        and _prev_plan[0] != "CONVERSATIONAL_ONLY"
+        and not _plan_is_done(_prev_plan, completed)
+    ):
+        logger.info("[Planner] Continuation cue ('%s') — resuming existing plan, not re-planning.",
+                    _latest_human.strip()[:20])
+        _record_metric("planner_resume", steps_done=len([c for c in completed if not str(c).startswith('[Review')]))
+        try:
+            from core import todo as _todo
+            _todo.set_current_task(_prev_task or "default")
+        except Exception:
+            pass
+        _resume_msg = AIMessage(content="▶️ أُكمل من حيث توقفت — لن أُعيد قراءة المشروع من البداية.")
+        return {
+            "messages":                messages + [_resume_msg],
+            "plan":                    _prev_plan,          # preserve the plan
+            "completed_steps":         completed,           # preserve progress
+            "iteration_count":         0,                   # fresh work budget
+            "error_logs":              state.get("error_logs", []),
+            "workspace":               workspace or state.get("workspace", ""),
+            "requires_human_approval": False,
+            "pending_command":         "",
+            "tool_call_history":       state.get("tool_call_history", []),
+            "last_tool_name":          state.get("last_tool_name", ""),
+            "last_tool_args":          state.get("last_tool_args", {}),
+            "last_message_content":    state.get("last_message_content", ""),
+            "task_id":                 _prev_task or __import__("uuid").uuid4().hex,
+        }
+
+    # ── Fast conversational path: a plain question/greeting is answered DIRECTLY
+    #    with one small-prompt LLM call and marked CONVERSATIONAL_ONLY — no
+    #    planner→worker→reviewer pipeline, no icons. Feels instant, like a chat. ─
+    if _looks_conversational(_latest_human):
+        logger.info("[Planner] Fast chat path: '%s' → direct answer (no task pipeline).",
+                    _latest_human.strip()[:30])
+        _record_metric("fast_chat")
+        try:
+            _chat_sys = SystemMessage(content=_CHAT_SYSTEM)
+            _chat_resp = _safe_llm_invoke(
+                _get_main_llm, _sanitize_messages([_chat_sys] + messages), label="Chat")
+            _chat_text = _chat_resp.content if isinstance(_chat_resp.content, str) else ""
+        except Exception as _exc:
+            logger.debug("[Planner] fast chat failed, falling back to planner: %s", _exc)
+            _chat_text = ""
+        if _chat_text.strip():
+            return {
+                "messages":                messages + [AIMessage(content=_chat_text.strip())],
+                "plan":                    ["CONVERSATIONAL_ONLY"],
+                "iteration_count":         0,
+                "completed_steps":         [],
+                "error_logs":              [],
+                "workspace":               workspace,
+                "requires_human_approval": False,
+                "pending_command":         "",
+                "tool_call_history":       [],
+                "last_tool_name":          "",
+                "last_tool_args":          {},
+                "last_message_content":    "",
+                "task_id":                 str(uuid.uuid4()),
+            }
+
     ctx_parts = []
     if workspace:
         ctx_parts.append(f"📂 Current workspace: {workspace}")
@@ -1545,6 +1743,14 @@ def planner_node(state: AgentState) -> dict:
         ctx_parts.append(
             "✅ Recently completed:\n"
             + "\n".join(f"  - {s[:120]}" for s in recent_done)
+        )
+    # ── Anti re-read: list files already read so the agent reuses them ────────
+    _read_paths = _already_read_paths(state.get("messages", []))
+    if _read_paths:
+        ctx_parts.append(
+            "📖 ALREADY READ this conversation — their contents are ABOVE, do NOT "
+            "read them again (reuse what you already saw). Only read NEW or CHANGED "
+            "files:\n" + "\n".join(f"  - {p}" for p in _read_paths[-20:])
         )
     session_ctx = ""
     if ctx_parts:
@@ -1580,12 +1786,23 @@ def planner_node(state: AgentState) -> dict:
             "task_id":                 str(uuid.uuid4()),  # ← NEW
         }
 
-    # ── Real task: extract numbered steps as the plan list ────────────────────
+    # ── Real task: extract steps as the plan list ─────────────────────────────
+    # Robust to different LLM formats (1. / 1) / • / - / * / **Step 1:** / خطوة N)
+    # so the plan — and therefore the live task panel — is always populated.
+    import re as _re_plan
+    _step_re = _re_plan.compile(
+        r"^\s*(?:\d+[\.\)]|[•\-\*]|(?:\*\*)?(?:step|خطوة|المهمة)\s*\d+[:：\.\)]?)",
+        _re_plan.IGNORECASE,
+    )
     plan_lines = [
-        ln.strip()
-        for ln in content.splitlines()
-        if ln.strip() and (ln.strip()[0].isdigit() or ln.strip().startswith("•"))
+        ln.strip() for ln in content.splitlines()
+        if ln.strip() and _step_re.match(ln.strip())
     ]
+    # Fallback: if nothing matched but the content clearly isn't conversational,
+    # treat each non-empty line as a step so work still proceeds + panel shows.
+    if not plan_lines:
+        plan_lines = [ln.strip() for ln in content.splitlines()
+                      if len(ln.strip()) > 8][:12]
 
     # ── Check for duplicate plan response (silent — no user-visible warning) ─
     # Deduplication is internal; the user should not see warnings about it.
@@ -1605,6 +1822,31 @@ def planner_node(state: AgentState) -> dict:
             "timestamp": __import__("time").time(),
         }
     )
+
+    # ── Seed the live todo checklist from the plan so it is populated from step
+    #    one; the worker then only updates statuses via todo_write as it works. ──
+    _seed_plan = plan_lines or [content]
+    try:
+        from core import budget as _budget
+        _budget.reset(task_id)
+    except Exception as _exc:
+        logger.debug("[Planner] budget reset skipped: %s", _exc)
+    try:
+        from core import todo as _todo
+        _todo.set_current_task(task_id)
+        _todo.clear_todos(task_id)
+        if _seed_plan and _seed_plan[0] != "CONVERSATIONAL_ONLY":
+            import re as _re
+            _seeds = []
+            for _i, _step in enumerate(_seed_plan):
+                _clean = _re.sub(r"^\s*(?:\d+[\.\)]|•|-)\s*", "", str(_step)).strip()
+                if _clean:
+                    _seeds.append({"id": f"t{_i + 1}", "content": _clean,
+                                   "status": "pending"})
+            if _seeds:
+                _todo.write_todos(task_id, _seeds, merge=False)
+    except Exception as _exc:
+        logger.debug("[Planner] todo seed skipped: %s", _exc)
 
     return {
         "messages":                messages + [cancel_marker, response],
@@ -1627,6 +1869,31 @@ def planner_node(state: AgentState) -> dict:
 # Node 2 — WorkerNode
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Prefixes/markers that mean a tool call did NOT make progress. Used to decide
+# whether an iteration advanced the plan (see worker_node). Kept deliberately
+# conservative: only clear failure/blocked/skip signals count as "not success".
+_TOOL_FAILURE_MARKERS = ("❌", "[ERROR]", "traceback")
+_TOOL_FAILURE_PREFIXES = ("🚫", "⏭️", "⛔", "⚠️ [REDIRECT-BLOCKED]")
+
+
+def _tool_result_is_error(result: object) -> bool:
+    """True if a tool result indicates failure / blocked / skipped (no progress).
+
+    A non-error result lets the worker advance the plan pointer. Blocked guards
+    (read-before-edit, editor redirect), duplicate skips, and unknown-tool
+    responses all return prefixed strings caught here, so they never count as a
+    completed step.
+    """
+    if not isinstance(result, str):
+        # Non-string results (rare) are treated as successful output.
+        return not result if isinstance(result, (list, dict)) else False
+    text = result.lstrip()
+    if any(text.startswith(p) for p in _TOOL_FAILURE_PREFIXES):
+        return True
+    low = text.lower()
+    return any(m.lower() in low for m in _TOOL_FAILURE_MARKERS)
+
+
 def worker_node(state: AgentState) -> dict:
     """
     Executes the next step from the plan using tool calls.
@@ -1644,6 +1911,14 @@ def worker_node(state: AgentState) -> dict:
     iteration  = state.get("iteration_count", 0)
     error_logs = list(state.get("error_logs", []))
     plan       = state.get("plan", [])
+
+    # ── Bind the live-todo context so the todo_write/todo_read tools address the
+    #    current task's checklist (Claude-Code-style self-updating task list). ──
+    try:
+        from core import todo as _todo
+        _todo.set_current_task(state.get("task_id", "") or "default")
+    except Exception as _exc:
+        logger.debug("[Worker] todo context bind skipped: %s", _exc)
 
     # ── Doom-loop nudge: if recent tool calls are repeating identically, steer ─
     # the model toward a different approach on THIS call. A halt (5×) is handled
@@ -1999,7 +2274,63 @@ def worker_node(state: AgentState) -> dict:
     if _loop_nudge_msg is not None:
         worker_messages = worker_messages + [_loop_nudge_msg]
 
+    # ── Verify-after-edit nudge ───────────────────────────────────────────────
+    # If the most recent successful code edit was never run/tested, steer THIS
+    # call toward executing it (explore→edit→verify). LLM-input only; not
+    # persisted. Fires only post-edit, so it never interrupts the read/edit phase.
+    try:
+        _vgate = verification_pending(state.get("tool_call_history", []))
+        if _vgate.pending:
+            from langchain_core.messages import HumanMessage as _HM
+            worker_messages = worker_messages + [_HM(content=generate_verify_nudge(_vgate))]
+            logger.info("[Worker] Verify-gate: edited '%s' not yet run — injecting verify nudge.", _vgate.file)
+    except Exception as _exc:
+        logger.debug("[Worker] verify-gate skipped: %s", _exc)
+
+    # ── Visual-verification nudge (build → run → SEE → fix) ───────────────────
+    # If a GUI/web artifact was run but never looked at with a vision model,
+    # steer THIS call toward analyze_screen/analyze_image. Bounded: clears after
+    # one visual analysis. Dormant when no vision provider is configured.
+    try:
+        _visgate = visual_verification_pending(state.get("tool_call_history", []))
+        if _visgate.pending:
+            from langchain_core.messages import HumanMessage as _HM2
+            worker_messages = worker_messages + [_HM2(content=generate_visual_nudge(_visgate))]
+            logger.info("[Worker] Visual-gate: ran '%s' but not seen — injecting visual nudge.", _visgate.file)
+    except Exception as _exc:
+        logger.debug("[Worker] visual-gate skipped: %s", _exc)
+
+    # ── Live task checklist: show the current todos so the model keeps ONE item
+    #    in_progress and marks items done via todo_write as it works. Input-only. ─
+    try:
+        from core import todo as _todo
+        _board = _todo.render(state.get("task_id", "") or "default")
+        if _board:
+            from langchain_core.messages import HumanMessage as _HM3
+            worker_messages = worker_messages + [_HM3(content=(
+                f"{_board}\n\nحدّث الحالة عبر todo_write فور بدء/إنهاء أي بند "
+                "(أبقِ بنداً واحداً فقط in_progress)."
+            ))]
+    except Exception as _exc:
+        logger.debug("[Worker] todo board inject skipped: %s", _exc)
+
     llm_response = _safe_llm_invoke(_get_llm_with_tools, _sanitize_messages(worker_messages), label="Worker")
+
+    # ── Token-budget accounting (spend cap) ──────────────────────────────────
+    # Estimate this turn's cost (prompt context + completion) and add it to the
+    # task total. should_continue halts the loop cleanly once the ceiling is
+    # crossed, so a runaway task can't quietly drain the account.
+    try:
+        from core import budget as _budget
+        if _budget.is_enabled():
+            _prompt_txt = " ".join(
+                str(getattr(m, "content", "")) for m in worker_messages
+            )
+            _resp_txt = str(getattr(llm_response, "content", "") or "")
+            _budget.add_text(state.get("task_id", "") or "default",
+                             _prompt_txt + " " + _resp_txt)
+    except Exception as _exc:
+        logger.debug("[Worker] budget accounting skipped: %s", _exc)
 
     # ── Strip DeepSeek DSML artefacts from message content ───────────────────
     # DeepSeek sometimes leaks <｜｜DSML｜｜tool_calls>...</｜｜DSML｜｜tool_calls>
@@ -2068,6 +2399,12 @@ def worker_node(state: AgentState) -> dict:
     task_id = state.get("task_id", "unknown")
 
     if hasattr(llm_response, "tool_calls") and llm_response.tool_calls:
+        # Track whether THIS iteration produced at least one genuinely successful
+        # tool result. The plan pointer (completed_steps) only advances on success,
+        # so a step whose tools ALL failed/were blocked is retried next iteration
+        # instead of being falsely marked done — which previously let the reviewer
+        # declare TASK_COMPLETE over failed steps (broke explore→edit→verify).
+        _iteration_success = False
         for tc in llm_response.tool_calls:
             # Defensive: extract fields safely — DeepSeek may emit tool_calls
             # with unexpected shapes
@@ -2300,6 +2637,8 @@ def worker_node(state: AgentState) -> dict:
                         tool_name=_auto, tool_args=tool_args, result=str(result),
                         tool_history=tool_call_history, max_history=20,
                     )
+                    if not _tool_result_is_error(raw_result):
+                        _iteration_success = True
                     last_tool_name, last_tool_args = _auto, tool_args
                     continue
 
@@ -2404,6 +2743,11 @@ def worker_node(state: AgentState) -> dict:
                 ):
                     error_logs.append(f"[task:{task_id}][{tool_name}] {result[:300]}")
 
+            # A non-error result means real progress this iteration → allow the
+            # plan pointer to advance below.
+            if not _tool_result_is_error(result):
+                _iteration_success = True
+
             new_messages.append(
                 ToolMessage(content=str(result), tool_call_id=tool_id)
             )
@@ -2417,13 +2761,24 @@ def worker_node(state: AgentState) -> dict:
                 max_history=20,
             )
 
-        # Record this step as completed
-        step_label = (
-            plan[len(updated_completed)]
-            if len(updated_completed) < len(plan)
-            else f"Extra step {len(updated_completed) + 1}"
-        )
-        updated_completed.append(step_label)
+        # Advance the plan pointer ONLY if at least one tool genuinely succeeded
+        # this iteration. If every tool failed/was blocked/skipped, hold the
+        # pointer so the next iteration retries the SAME step instead of marching
+        # past it. The doom-loop / skip-streak guards in should_continue() cap how
+        # many times a hopeless step can be retried, so this cannot hang.
+        if _iteration_success:
+            step_label = (
+                plan[len(updated_completed)]
+                if len(updated_completed) < len(plan)
+                else f"Extra step {len(updated_completed) + 1}"
+            )
+            updated_completed.append(step_label)
+        else:
+            logger.info(
+                "[Worker] Iteration %d produced no successful tool result — "
+                "holding plan pointer at step %d for retry.",
+                iteration + 1, len(updated_completed) + 1,
+            )
 
     # Get the last tool name and args if any were called
     last_tool_name = ""
@@ -2475,6 +2830,9 @@ PART A — الحكم على المهمة (سطر واحد فقط)
   TASK_COMPLETE:  ← ثم اكتب التقرير النهائي الشامل في الأسطر التالية
   CONTINUE: [اسم_الأداة] ← سطر واحد فقط — بدون أي نص إضافي بعده إطلاقاً
   FAILED:         ← ثم اكتب سبب الفشل في الأسطر التالية
+  REPLAN: [السبب] ← استخدمها فقط عندما تكون الخطة الحالية نفسها خاطئة أو غير
+                    مجدية (لا مجرد فشل خطوة واحدة قابلة لإعادة المحاولة): عندئذٍ
+                    يعيد المُخطِّط بناء خطة جديدة من الصفر. اكتب سبباً موجزاً بعدها.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🔎 قاعدة نتائج البحث في الويب (web_search / web_answer)
@@ -2770,8 +3128,28 @@ def reviewer_node(state: AgentState) -> dict:
         f"══ نهاية معلومات التقدم ══"
     )
 
+    # ── Verify-after-edit gate: is there a code edit that was never run? ───────
+    _vgate = verification_pending(state.get("tool_call_history", []))
+    _verify_hint = ""
+    if _vgate.pending:
+        _verify_hint = (
+            f"\n\n⚠️ [VERIFY GATE] تم تعديل ملف كود ({_vgate.file}) ولم يُشغَّل/يُختبَر بعد.\n"
+            "ممنوع إعلان TASK_COMPLETE الآن. اكتب: CONTINUE: run_python — "
+            "ليُشغِّل العامل الملف ويتأكد أنه يعمل قبل الإنهاء."
+        )
+
+    # ── Visual-verification gate: was a GUI/web artifact run but never seen? ───
+    _visgate = visual_verification_pending(state.get("tool_call_history", []))
+    _visual_hint = ""
+    if _visgate.pending:
+        _visual_hint = (
+            f"\n\n⚠️ [VISUAL GATE] شُغِّلت واجهة رسومية/صفحة ({_visgate.file}) ولم يُنظَر إليها بصرياً بعد.\n"
+            "التشغيل بلا خطأ لا يكفي — ممنوع TASK_COMPLETE الآن. اكتب: CONTINUE: analyze_screen — "
+            "ليفحص العامل الواجهة بصرياً (analyze_screen/analyze_image) قبل الإنهاء."
+        )
+
     # ONE combined system message — never converted by _sanitize_messages
-    system   = SystemMessage(content=_REVIEWER_SYSTEM + _progress_section)
+    system   = SystemMessage(content=_REVIEWER_SYSTEM + _progress_section + _verify_hint + _visual_hint)
     response = _safe_llm_invoke(_get_main_llm, _sanitize_messages([system] + messages), label="Reviewer")
 
     # ── Strip verdict prefixes — keep verdict for should_continue() logic
@@ -2821,6 +3199,51 @@ def reviewer_node(state: AgentState) -> dict:
         else:
             _verdict_tag = "CONTINUE"
 
+    # ── Deterministic verify-gate override ────────────────────────────────────
+    # Even if the model declared TASK_COMPLETE, a code edit that was never run
+    # is NOT complete. Flip to CONTINUE so the worker runs it. This is deliberate
+    # and bounded: the gate clears after ANY run fires next iteration (pass or
+    # fail), so it forces at most one verification and can never loop.
+    if _vgate.pending and _verdict_tag == "TASK_COMPLETE":
+        logger.info(
+            "[Reviewer] Verify-gate override: TASK_COMPLETE → CONTINUE (%s not yet run).",
+            _vgate.file,
+        )
+        _record_metric("verify_gate_override", file=_vgate.file)
+        _verdict_tag = "CONTINUE"
+        # Rebuild the response so NEITHER content NOR metadata carries a
+        # TASK_COMPLETE token (should_continue scans both).
+        raw_content = f"CONTINUE: run_python  # verify-gate: {_vgate.file} not yet run"
+        response = AIMessage(
+            content=(
+                f"⏳ عدّلت الملف ({_vgate.file}) لكنه لم يُشغَّل بعد. "
+                "سأتحقق بتشغيله للتأكد أنه يعمل قبل إعلان الاكتمال."
+            ),
+            metadata={"_original_verdict": raw_content},
+        )
+
+    # ── Deterministic visual-gate override ────────────────────────────────────
+    # A GUI/web app that ran without crashing may still be visually broken. If it
+    # was never looked at, TASK_COMPLETE is premature — flip to CONTINUE so the
+    # worker calls analyze_screen. Bounded identically: clears after one visual
+    # analysis. Only fires when the run-gate above is NOT already overriding
+    # (must run before you can look).
+    elif _visgate.pending and _verdict_tag == "TASK_COMPLETE":
+        logger.info(
+            "[Reviewer] Visual-gate override: TASK_COMPLETE → CONTINUE (%s not yet seen).",
+            _visgate.file,
+        )
+        _record_metric("visual_gate_override", file=_visgate.file)
+        _verdict_tag = "CONTINUE"
+        raw_content = f"CONTINUE: analyze_screen  # visual-gate: {_visgate.file} not yet seen"
+        response = AIMessage(
+            content=(
+                "⏳ شغّلت الواجهة لكنني لم أنظر إليها بصرياً بعد. "
+                "سأفحصها بـ analyze_screen للتأكد أنها ظهرت صحيحة قبل إعلان الاكتمال."
+            ),
+            metadata={"_original_verdict": raw_content},
+        )
+
     completed = list(completed_steps)
     completed.append(f"[Review:{_verdict_tag}] {raw_content[:120]}")
 
@@ -2845,7 +3268,12 @@ def reviewer_node(state: AgentState) -> dict:
 # Conditional edge — should_continue
 # ─────────────────────────────────────────────────────────────────────────────
 
-def should_continue(state: AgentState) -> Literal["worker", "__end__"]:
+# Max times the reviewer may send the flow back to the planner for a fresh plan
+# within one task. Bounded so a REPLAN↔plan cycle can never run forever.
+MAX_REPLANS = 2
+
+
+def should_continue(state: AgentState) -> Literal["worker", "planner", "__end__"]:
     """
     Routing function called after ReviewerNode.
 
@@ -2868,6 +3296,21 @@ def should_continue(state: AgentState) -> Literal["worker", "__end__"]:
     # ── Hard iteration ceiling ────────────────────────────────────────────────
     if iteration >= MAX_ITERATIONS:
         return "__end__"
+
+    # ── Token-budget ceiling (spend cap) ─────────────────────────────────────
+    # Bounds the account cost of a single task. Halts cleanly once the estimated
+    # token total crosses HAYO_TASK_TOKEN_BUDGET. Disabled when set to 0.
+    try:
+        from core import budget as _budget
+        _task_id = state.get("task_id", "") or "default"
+        if _budget.over_budget(_task_id):
+            logger.warning("[should_continue] Forcing __end__: token budget exceeded (%s).",
+                           _budget.status(_task_id))
+            _record_metric("budget_halt", used=_budget.used(_task_id),
+                           limit=_budget.budget_limit())
+            return "__end__"
+    except Exception as _exc:
+        logger.debug("[should_continue] budget check skipped: %s", _exc)
 
     # ── Stuck-loop guard: worker repeatedly not calling tools ─────────────────
     no_tool_streak = sum(
@@ -2971,6 +3414,24 @@ def should_continue(state: AgentState) -> Literal["worker", "__end__"]:
             check_text = f"{content} {original}"
             if "TASK_COMPLETE:" in check_text or "FAILED:" in check_text:
                 return "__end__"
+            # ── REPLAN routing: the reviewer judged the current plan wrong and
+            #    wants a fresh one. Route back to the planner, but cap the number
+            #    of replans per task so a REPLAN↔plan cycle can never loop. ──
+            if "REPLAN:" in check_text:
+                replans = sum(
+                    1 for m in messages
+                    if isinstance(m, AIMessage) and not getattr(m, "tool_calls", [])
+                    and "REPLAN:" in (
+                        (m.metadata or {}).get("_original_verdict", "")
+                        if hasattr(m, "metadata") and isinstance(m.metadata, dict) else ""
+                    )
+                )
+                if replans <= MAX_REPLANS:
+                    logger.info("[should_continue] REPLAN #%d → routing to planner.", replans)
+                    _record_metric("replan_route", count=replans)
+                    return "planner"
+                logger.warning("[should_continue] REPLAN cap (%d) reached — continuing instead of replanning.", MAX_REPLANS)
+                return "worker"
             # Also stop if the reviewer is asking the user for info
             if "waiting for user" in content.lower() or "provide the" in content.lower():
                 return "__end__"

@@ -216,6 +216,71 @@ def _is_continue_request(text: str) -> bool:
     return False
 
 
+# ── Ask / Agent mode (like the reference platform) ───────────────────────────
+# "agent" = full executive pipeline (plan → tools → verify). "ask" = pure chat:
+# answer directly, NEVER run tools or touch the workspace. An explicit mode ends
+# the question-vs-command confusion for good.
+def _get_mode() -> str:
+    return cl.user_session.get("chat_mode", "agent") or "agent"
+
+
+def _set_mode(mode: str) -> None:
+    cl.user_session.set("chat_mode", "ask" if mode == "ask" else "agent")
+
+
+_ASK_SYSTEM = (
+    "أنت HAYO في وضع «السؤال» (Ask). أجب مباشرةً وبوضوح على المستخدم بلغته "
+    "(عربي/إنجليزي) اعتماداً على معرفتك والمحادثة. هذا وضع محادثة فقط: لا تنفّذ أي "
+    "أوامر، ولا تفتح تطبيقات، ولا تعدّل ملفات، ولا تستخدم أدوات — فقط أجب كخبير مفيد. "
+    "إن طلب المستخدم تنفيذ مهمة فعلية على الجهاز، أخبره بلطف أن ينتقل إلى وضع «الوكيل» "
+    "(Agent) من الزر بالأعلى ليقوم بذلك."
+)
+
+
+async def _run_ask_mode(user_text: str, config: dict) -> None:
+    """Answer in chat-only mode: a single streamed LLM reply, no graph, no tools."""
+    from agent.nodes import _get_main_llm
+    from langchain_core.messages import SystemMessage as _Sys
+
+    # Pull a little prior context (read-only) so multi-turn chat feels continuous.
+    ctx_msgs: list = []
+    try:
+        st = await GRAPH.aget_state(config)
+        prior = (st.values or {}).get("messages", []) if st else []
+        ctx_msgs = [
+            m for m in prior
+            if isinstance(m, HumanMessage)
+            or (isinstance(m, AIMessage) and not getattr(m, "tool_calls", []))
+        ][-8:]
+    except Exception:
+        ctx_msgs = []
+
+    out = cl.Message(content="")
+    await out.send()
+    full: list[str] = []
+    try:
+        llm = _get_main_llm()
+        convo = [_Sys(content=_ASK_SYSTEM)] + ctx_msgs + [HumanMessage(content=user_text)]
+        async for chunk in llm.astream(convo):
+            piece = _extract_text_chunk(chunk)
+            if piece:
+                await out.stream_token(piece)
+                full.append(piece)
+    except Exception as exc:
+        await out.stream_token(f"\n\n❌ تعذّر الرد: {exc}")
+    await out.update()
+
+    # Persist the turn so the next Ask/Agent message keeps the context.
+    try:
+        await GRAPH.aupdate_state(
+            config,
+            {"messages": [HumanMessage(content=user_text),
+                          AIMessage(content="".join(full))]},
+        )
+    except Exception:
+        pass
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Streaming helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -388,6 +453,43 @@ async def _run_graph(input_or_command, config: dict) -> None:
     # Do NOT do lazy init inside the loop — response_msg.id is available right now.
     _parent_id: str | None = response_msg.id
 
+    # ── Live "Task progress" panel (mirrors the reference dropdown) ───────────
+    # A dedicated collapsible step that shows the agent's live todo checklist
+    # with completed items struck through. Lazily created on the first non-empty
+    # board so conversational replies don't show an empty panel.
+    task_progress_step: cl.Step | None = None
+    _last_board: str = ""
+
+    async def _refresh_task_progress() -> None:
+        nonlocal task_progress_step, _last_board
+        try:
+            from core import todo as _todo
+            board = _todo.render_markdown(_todo.active_task())
+        except Exception:
+            return
+        if not board or board == _last_board:
+            return
+        _last_board = board
+        try:
+            done, total = 0, 0
+            try:
+                from core import todo as _todo2
+                done, total = _todo2.progress(_todo2.active_task())
+            except Exception:
+                pass
+            if task_progress_step is None:
+                task_progress_step = cl.Step(
+                    name=f"📋 قائمة المهام | Task progress ({done}/{total})",
+                    type="run", parent_id=_parent_id,
+                )
+                await task_progress_step.__aenter__()
+            else:
+                task_progress_step.name = f"📋 قائمة المهام | Task progress ({done}/{total})"
+            task_progress_step.output = board
+            await task_progress_step.update()
+        except Exception:
+            pass
+
     # ─────────────────────────────────────────────────────────────────────────
     async def _close_worker_step() -> None:
         nonlocal worker_step
@@ -443,6 +545,9 @@ async def _run_graph(input_or_command, config: dict) -> None:
             input_or_command, config=config, stream_mode="messages"
         ):
             node = metadata.get("langgraph_node", "")
+
+            # Keep the live task-progress panel fresh as work proceeds.
+            await _refresh_task_progress()
 
             # ── Node transition ───────────────────────────────────────────
             if node and node != current_node:
@@ -705,6 +810,14 @@ async def _run_graph(input_or_command, config: dict) -> None:
 
         await _close_worker_step()
         await _close_active_step()
+
+        # ── Final task-progress refresh + close the panel ────────────────────
+        await _refresh_task_progress()
+        if task_progress_step is not None:
+            try:
+                await task_progress_step.__aexit__(None, None, None)
+            except Exception:
+                pass
 
         # ── Conversational replay (final safety net) ─────────────────────────
         # Worker/reviewer are pass-through for CONVERSATIONAL_ONLY (no LLM
@@ -1133,7 +1246,12 @@ def _quick_actions() -> list:
         ("📊 تقرير Excel", "أنشئ تقرير مبيعات Excel من بيانات تجريبية ونسّقه على سطح المكتب"),
         ("🏗️ ابنِ تطبيق", "ابنِ تطبيق آلة حاسبة بواجهة رسومية وحوّله إلى exe على سطح المكتب"),
     ]
+    _mode = _get_mode()
     actions = [
+        cl.Action(name="set_mode", label=("💬 وضع السؤال" + (" ✓" if _mode == "ask" else "")),
+                  payload={"mode": "ask"}),
+        cl.Action(name="set_mode", label=("⚙️ وضع الوكيل" + (" ✓" if _mode == "agent" else "")),
+                  payload={"mode": "agent"}),
         cl.Action(name="pick_workspace", label="📁 مجلد العمل", payload={}),
     ]
     actions.extend(
@@ -1141,6 +1259,37 @@ def _quick_actions() -> list:
         for label, cmd in items
     )
     return actions
+
+
+@cl.action_callback("set_mode")
+async def _on_set_mode(action: cl.Action):
+    """Toggle between Ask (chat-only) and Agent (executive) modes."""
+    mode = (action.payload or {}).get("mode", "agent")
+    _set_mode(mode)
+    try:
+        await action.remove()
+    except Exception:
+        pass
+    if _get_mode() == "ask":
+        await cl.Message(content=(
+            "💬 **وضع السؤال (Ask)** مُفعّل — سأجيب على أسئلتك مباشرةً فقط، "
+            "**بدون تنفيذ أي مهام أو فتح تطبيقات**. للتنفيذ، بدّل إلى وضع الوكيل."
+        )).send()
+    else:
+        await cl.Message(content=(
+            "⚙️ **وضع الوكيل (Agent)** مُفعّل — سأخطّط وأنفّذ المهام على جهازك "
+            "(قراءة/تعديل ملفات، فتح تطبيقات، بناء مشاريع...)."
+        )).send()
+
+
+@cl.on_settings_update
+async def _on_settings_update(settings: dict):
+    """Apply the Ask/Agent mode chosen from the settings panel selector."""
+    mode = (settings or {}).get("chat_mode", "agent")
+    _set_mode(mode)
+    label = "💬 وضع السؤال (Ask) — دردشة فقط" if _get_mode() == "ask" \
+        else "⚙️ وضع الوكيل (Agent) — تنفيذ المهام"
+    await cl.Message(content=f"تم التبديل إلى: **{label}**").send()
 
 
 @cl.action_callback("run_cmd")
@@ -1474,6 +1623,23 @@ async def on_chat_start() -> None:
     cl.user_session.set("voice_name", "salma")  # ar-EG-SalmaNeural
     cl.user_session.set("audio_buffer", bytearray())
     cl.user_session.set("audio_mime", "audio/webm")
+
+    # ── Ask / Agent mode: default to Agent; expose a persistent selector ──────
+    cl.user_session.set("chat_mode", cl.user_session.get("chat_mode", "agent"))
+    try:
+        from chainlit.input_widget import Select as _Select
+        await cl.ChatSettings([
+            _Select(
+                id="chat_mode",
+                label="الوضع | Mode",
+                values=["agent", "ask"],
+                initial_value=_get_mode(),
+                items={"⚙️ الوكيل — ينفّذ المهام (Agent)": "agent",
+                       "💬 السؤال — دردشة فقط (Ask)": "ask"},
+            ),
+        ]).send()
+    except Exception as _exc:
+        _logger.debug("ChatSettings mode selector skipped: %s", _exc)
 
     last_session = _load_last_session()
     last_thread = last_session.get("thread_id")
@@ -2190,6 +2356,29 @@ async def on_message(message: cl.Message) -> None:
         await _handle_hitl_loop(config)
         return
 
+    # ── Ask / Agent mode commands ─────────────────────────────────────────────
+    _ut_low = user_text.lower().strip()
+    if _ut_low in ("/ask", "/سؤال", "/دردشة"):
+        _set_mode("ask")
+        await cl.Message(content=(
+            "💬 **وضع السؤال (Ask)** مُفعّل — أجيب مباشرةً فقط، بدون تنفيذ. "
+            "بدّل إلى `/agent` للتنفيذ."), actions=_quick_actions()).send()
+        return
+    if _ut_low in ("/agent", "/وكيل", "/تنفيذ"):
+        _set_mode("agent")
+        await cl.Message(content=(
+            "⚙️ **وضع الوكيل (Agent)** مُفعّل — أخطّط وأنفّذ المهام على جهازك."),
+            actions=_quick_actions()).send()
+        return
+
+    # ── Ask-mode enforcement: chat only, NEVER execute ────────────────────────
+    # In Ask mode a message is answered directly with one LLM reply — no planner,
+    # no tools, no workspace side-effects. This is the definitive fix for the
+    # "I only asked a question but it went off doing executive work" problem.
+    if _get_mode() == "ask":
+        await _run_ask_mode(user_text, config)
+        return
+
     # ── Continue / Resume detection ───────────────────────────────────────────
     if _is_continue_request(user_text):
         # First try the current thread, then fall back to the resumable thread
@@ -2356,7 +2545,19 @@ async def on_message(message: cl.Message) -> None:
     await _handle_hitl_loop(config)
     # Keep working autonomously until the task is genuinely complete — the user
     # should never have to type "أكمل" mid-task. (Disable via AUTO_CONTINUE=false.)
-    await _auto_continue_until_done(config)
+    # GUARD: never auto-continue after a purely CONVERSATIONAL turn. Otherwise a
+    # greeting/question could drag the agent into resuming a stale task from a
+    # previously-loaded workspace ("answered, then went off doing executive work").
+    _skip_autocont = False
+    try:
+        _pv = await GRAPH.aget_state(config)
+        _plan_now = (_pv.values or {}).get("plan", []) if _pv else []
+        if _plan_now and _plan_now[0] == "CONVERSATIONAL_ONLY":
+            _skip_autocont = True
+    except Exception:
+        pass
+    if not _skip_autocont:
+        await _auto_continue_until_done(config)
 
     # Finish task tracking
     _task_elapsed = _time.time() - _task_start

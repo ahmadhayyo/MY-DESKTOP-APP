@@ -5,28 +5,23 @@ color 0A
 
 echo.
 echo  ╔══════════════════════════════════════════════════════════╗
-echo  ║                                                          ║
 echo  ║     🤖  HAYO AI Agent — وكيل ذكي خارق القدرات            ║
-echo  ║                                                          ║
-echo  ║     Starting server — please wait...                     ║
-echo  ║                                                          ║
+echo  ║        Starting server — please wait...                  ║
 echo  ╚══════════════════════════════════════════════════════════╝
 echo.
 
 :: Move to the project folder (works from any location)
 cd /d "%~dp0"
 
-:: Check if venv exists, create if not
+:: ── Create venv if missing ────────────────────────────────────────────────
 if not exist "venv\Scripts\activate.bat" (
     echo  [..] Creating virtual environment...
     python -m venv venv
     if errorlevel 1 (
-        echo  [ERROR] Failed to create virtual environment.
-        echo  Make sure Python 3.10+ is installed and in PATH.
+        echo  [ERROR] Failed to create virtual environment. Install Python 3.10+ and add to PATH.
         pause
         exit /b 1
     )
-    echo  [OK] Virtual environment created.
 )
 
 :: Activate the virtual environment
@@ -37,74 +32,48 @@ if errorlevel 1 (
     exit /b 1
 )
 echo  [OK] Virtual environment activated.
-echo.
 
-:: Install / update dependencies
-echo  [..] Checking dependencies (first run may take 5-10 minutes)...
-echo.
-pip install -r requirements.txt --exists-action i --progress-bar on
-if errorlevel 1 (
-    echo.
-    echo  [ERROR] Failed to install some dependencies.
-    echo  Check your internet connection and try again.
-    pause
-    exit /b 1
-)
-echo.
-echo  [OK] Dependencies up to date.
-echo.
-
-:: Install Playwright browsers if not already installed
-echo  [..] Checking Playwright browsers...
-python -m playwright install chromium --with-deps
-if errorlevel 1 (
-    echo  [WARNING] Playwright browser install failed — browser tools may not work.
-    echo  You can try manually: python -m playwright install chromium --with-deps
-) else (
-    echo  [OK] Browser ready.
-)
-echo.
-
-:: Check .env file exists
-if not exist ".env" (
-    echo  [WARNING] .env file not found!
-    if exist ".env.example" (
-        echo  Copying .env.example to .env ...
-        copy /Y ".env.example" ".env" >nul
-        echo  [OK] .env created from .env.example
-    ) else (
-        echo  Creating a default .env file with Ollama ^(free local AI^)...
-        echo MODEL_PROVIDER=ollama> .env
-        echo OLLAMA_BASE_URL=http://localhost:11434>> .env
-        echo OLLAMA_AGENT_MODEL=dolphin3>> .env
-        echo OLLAMA_SUMMARIZER_MODEL=dolphin3>> .env
-        echo GOOGLE_API_KEY=>> .env
-        echo ANTHROPIC_API_KEY=>> .env
-        echo OPENAI_API_KEY=>> .env
-        echo DEEPSEEK_API_KEY=>> .env
-        echo GROQ_API_KEY=>> .env
-        echo  [OK] .env created with Ollama as default provider.
+:: ── Install dependencies ONLY on first run (marker file) ──────────────────
+::    Subsequent launches skip this and start in seconds. Delete
+::    venv\.deps_ok (or run FIX.bat) to force a reinstall after updating deps.
+if not exist "venv\.deps_ok" (
+    echo  [..] First-time setup: installing dependencies (5-10 min, one time only)...
+    pip install -r requirements.txt --exists-action i --progress-bar on
+    if errorlevel 1 (
+        echo  [ERROR] Failed to install dependencies. Check your internet connection.
+        pause
+        exit /b 1
     )
-    echo.
-    echo  [!] Edit .env to configure your preferred AI provider and API keys.
-    echo  [!] Default: Ollama ^(free, local^). Make sure Ollama is running: ollama serve
-    echo.
+    echo  [..] Installing Playwright browser (one time)...
+    python -m playwright install chromium --with-deps
+    echo done> "venv\.deps_ok"
+    echo  [OK] Setup complete.
+) else (
+    echo  [OK] Dependencies already installed — starting fast.
 )
 
-:: Launch Chainlit
+:: ── Ensure .env exists ────────────────────────────────────────────────────
+if not exist ".env" (
+    if exist ".env.example" (
+        copy /Y ".env.example" ".env" >nul
+    )
+    echo  [!] Created .env — edit it to set MODEL_PROVIDER and API keys.
+)
+
+echo.
 echo  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-echo.
-echo  🌐 Opening http://localhost:8000
-echo  📋 Model: Check .env for MODEL_PROVIDER setting
-echo.
-echo  Press CTRL+C to stop the server.
-echo  Or double-click STOP.bat to stop from another window.
-echo.
+echo   🌐 The browser will open automatically once the server is READY.
+echo   Press CTRL+C here (or run STOP.bat) to stop the server.
 echo  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo.
 
-:: --headless prevents chainlit from auto-opening browser; we open one window ourselves
-start "" http://localhost:8000
+:: ── Background waiter: opens the browser ONLY after port 8000 is listening ──
+::    (Fixes the old bug where the browser opened before the server was up and
+::     showed "site can't be reached".)
+start "" /b powershell -NoProfile -WindowStyle Hidden -Command ^
+  "$u='http://localhost:8000'; for($i=0;$i -lt 90;$i++){ try{ $c=New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1',8000); $c.Close(); Start-Process $u; break }catch{ Start-Sleep -Milliseconds 700 } }"
+
+:: ── Foreground server (closing this window / CTRL+C stops it) ──────────────
 chainlit run app.py --port 8000 --headless
 
 echo.
