@@ -1144,6 +1144,13 @@ def launch_app_smart(
                 os.path.expanduser(r"~\AppData\Local"),
                 os.path.expanduser(r"~\AppData\Roaming"),
                 r"C:\Windows\System32",
+                # Portable/manually-placed apps: users often organize installed
+                # apps or portable .exe tools into subfolders on the Desktop or
+                # in Downloads rather than a system install path. Without these,
+                # launch_app_smart could NEVER find an app the user put in a
+                # Desktop subfolder — search recursively (glob "**" below).
+                os.path.expanduser(r"~\Desktop"),
+                os.path.expanduser(r"~\Downloads"),
             ]
             exe_name = app_name.lower().replace(" ", "") + ".exe"
             found_exe = None

@@ -352,6 +352,28 @@ class VisualGateTests(unittest.TestCase):
                  "args": {"path": "site/index.html"}, "result": "ok"}]
         self.assertTrue(visual_verification_pending(hist).pending)
 
+    def test_android_launch_arms(self):
+        # Launching an app on the emulator must be visually confirmed.
+        hist = [{"name": "android_launch_app",
+                 "args": {"package": "com.example"}, "result": "[OK] launched"}]
+        self.assertTrue(visual_verification_pending(hist).pending)
+
+    def test_android_screenshot_clears(self):
+        hist = [{"name": "android_install_apk", "args": {"path": "app.apk"}, "result": "[OK]"},
+                {"name": "android_screenshot", "args": {}, "result": "[OK] saved"}]
+        self.assertFalse(visual_verification_pending(hist).pending)
+
+    def test_adb_via_terminal_run_arms(self):
+        hist = [{"name": "terminal_run",
+                 "args": {"command": "adb shell am start com.example/.Main"}, "result": "ok"}]
+        self.assertTrue(visual_verification_pending(hist).pending)
+
+    def test_android_nudge_mentions_emulator_screenshot(self):
+        hist = [{"name": "android_launch_app",
+                 "args": {"package": "com.example"}, "result": "[OK]"}]
+        nudge = generate_visual_nudge(visual_verification_pending(hist))
+        self.assertIn("android_screenshot", nudge)
+
     def test_build_desktop_app_arms(self):
         hist = [{"name": "build_desktop_app",
                  "args": {"path": "app.py"}, "result": "[OK] built"}]

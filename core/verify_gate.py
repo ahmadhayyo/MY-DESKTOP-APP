@@ -49,6 +49,7 @@ VERIFY_TOOLS = frozenset(
         "lint_python",
         "run_cmd",
         "run_powershell",
+        "terminal_run",   # persistent-session runner (pip/adb/build/test all go here)
         "build_exe",
         "build_desktop_app",
     }
@@ -182,10 +183,18 @@ def generate_verify_nudge(gate: VerifyGate) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Tools that constitute a real visual inspection of the result.
-VISUAL_ANALYZE_TOOLS = frozenset({"analyze_screen", "analyze_image"})
+# analyze_screen/analyze_image = look at the PC screen; android_screenshot =
+# capture the EMULATOR screen (the only way to actually confirm an Android app's
+# state — a script's exit code says nothing about what's on the device).
+VISUAL_ANALYZE_TOOLS = frozenset(
+    {"analyze_screen", "analyze_image", "android_screenshot"}
+)
 
-# Building/launching a desktop app is inherently visual.
-VISUAL_BUILD_TOOLS = frozenset({"build_desktop_app"})
+# Building/launching a desktop app, or installing/launching an app on the
+# Android emulator, is inherently visual — the result must be LOOKED AT.
+VISUAL_BUILD_TOOLS = frozenset(
+    {"build_desktop_app", "android_install_apk", "android_launch_app"}
+)
 
 # Substrings that betray a GUI / web / rendered artifact in a run's args
 # (the `code` of run_python, the `path`/`command` of run_script/shells, etc.).
@@ -200,6 +209,9 @@ _VISUAL_SIGNALS = (
     "npm run", "npm start", "yarn dev", "vite", "next dev",
     # a rendered page/file itself
     ".html", "index.html", "localhost:", "127.0.0.1:",
+    # Android emulator work — an adb/emulator command whose effect is only
+    # observable ON the device screen (install/launch/tap/monkey/an .apk).
+    "adb ", "emulator-", ".apk", "am start", "monkey ", "uiautomator",
 )
 
 
@@ -277,9 +289,24 @@ def visual_verification_pending(tool_history: list[dict] | None) -> VerifyGate:
 
 def generate_visual_nudge(gate: VerifyGate) -> str:
     """Guidance telling the model to VISUALLY inspect what it just launched."""
-    target = gate.file or "التطبيق/الصفحة التي شغّلتها"
+    target = (gate.file or "").lower()
+    is_android = any(s in target for s in ("android", "adb", "emulator", ".apk", "am start"))
+    hint = gate.file or ("التطبيق على المحاكي" if is_android else "التطبيق/الصفحة التي شغّلتها")
+    if is_android:
+        return (
+            f"[LOOK REQUIRED] عملت على تطبيق أندرويد على المحاكي ({hint}) لكنك لم "
+            "تتحقق بصرياً من حالته على المحاكي بعد.\n"
+            "⚠️ نجاح أمر adb أو خروج سكربت بلا خطأ لا يعني أن التطبيق يعمل فعلاً على "
+            "الشاشة — قد يكون انهار (crash/ANR) أو عالقاً على شاشة بيضاء.\n"
+            "الخطوة الإلزامية قبل إعلان أي نجاح = انظر إلى المحاكي فعلياً:\n"
+            "1) android_screenshot(device='emulator-5554') لالتقاط شاشة المحاكي.\n"
+            "2) analyze_image(path='<مسار اللقطة>', question='هل التطبيق يعمل صحيحاً "
+            "على المحاكي؟ هل توجد أخطاء أو انهيار أو شاشة فارغة؟') لتحليلها فعلياً.\n"
+            "إن رأى النموذج خللاً، أصلحه وأعد الاختبار والنظر. "
+            "لا تقل 'كل شيء على ما يرام' قبل تأكيد بصري حقيقي من المحاكي."
+        )
     return (
-        f"[LOOK REQUIRED] شغّلت واجهة رسومية/صفحة ({target}) لكنك لم تنظر إليها بصرياً بعد.\n"
+        f"[LOOK REQUIRED] شغّلت واجهة رسومية/صفحة ({hint}) لكنك لم تنظر إليها بصرياً بعد.\n"
         "تشغيلها بلا خطأ لا يكفي — قد تكون فارغة أو مشوّهة أو بها خطأ ظاهر على الشاشة.\n"
         "الخطوة الإلزامية التالية قبل الإنهاء = رؤيتها فعلياً:\n"
         "- تأكد أن النافذة/المتصفح ظاهر (افتحه إن لزم) ثم استدعِ analyze_screen"

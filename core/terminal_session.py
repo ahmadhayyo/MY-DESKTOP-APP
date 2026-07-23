@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import queue
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -46,17 +47,61 @@ _PROMPT_MARK = "HAYORDY"
 _PROMPT_PREFIX = _PROMPT_MARK + ">"
 
 
+_bootstrap_bat_cache: str | None = None
+
+
+def _bootstrap_bat_path() -> str:
+    """Path to a small generated .bat that activates HAYO's own venv (if any)
+    and sets up the session prompt — cached after first build.
+
+    CRITICAL: without venv activation, `pip install X` / bare `python`/`pip`
+    inside a terminal_run session resolve via PATH to WHATEVER Python is first
+    on the system (observed live: a totally unrelated system Python 3.14
+    install) — NOT the same interpreter run_script/run_python use
+    (sys.executable, the app's own venv). A package installed that way is
+    invisible to run_script's Python, so "install the missing dependency, then
+    re-run to verify" silently fails even though the install itself succeeded.
+
+    Why a .bat file instead of a single `cmd.exe /K "command"` string: passing
+    a command containing both quotes (around the activate.bat path, which has
+    spaces) AND `&` chaining as ONE argument hits classic Windows cmd.exe /K
+    quote-parsing ambiguity — verified live: the activation silently no-ops.
+    Writing the commands to a real .bat file and launching THAT sidesteps all
+    quoting issues entirely (a bare file path is trivially quoted correctly).
+    """
+    global _bootstrap_bat_cache
+    if _bootstrap_bat_cache and os.path.isfile(_bootstrap_bat_cache):
+        return _bootstrap_bat_cache
+
+    import tempfile
+    lines = ["@echo off"]
+    scripts_dir = os.path.dirname(sys.executable)
+    activate_bat = os.path.join(scripts_dir, "activate.bat")
+    if os.path.isfile(activate_bat):
+        lines.append(f'call "{activate_bat}"')
+    lines.append(f"prompt {_PROMPT_MARK}$G")
+
+    fd, path = tempfile.mkstemp(prefix="hayo_term_bootstrap_", suffix=".bat")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("\r\n".join(lines) + "\r\n")
+    _bootstrap_bat_cache = path
+    return path
+
+
 class _Session:
     def __init__(self, session_id: str, cwd: str | None = None):
         self.id = session_id
         self.cwd = cwd or os.getcwd()
         self._q: "queue.Queue[str]" = queue.Queue()
-        # Launch with the prompt marker + echo-off applied by /K itself, so it is
-        # guaranteed active before any user command (writing it to stdin after
-        # start proved unreliable). The unique prompt marker prefixes every output
-        # line (cmd prints the prompt with no trailing newline) and we strip it.
+        # Launch via a generated bootstrap .bat (venv activation + echo-off +
+        # prompt marker) so they are guaranteed active before any user command
+        # (writing to stdin after start proved unreliable, and a single /K
+        # "command string" with embedded quotes+& hits cmd.exe quoting bugs —
+        # see _bootstrap_bat_path). The unique prompt marker prefixes every
+        # output line (cmd prints the prompt with no trailing newline); stripped
+        # in run().
         self._proc = subprocess.Popen(
-            ["cmd.exe", "/Q", "/K", f"@echo off & prompt {_PROMPT_MARK}$G"],
+            ["cmd.exe", "/Q", "/K", _bootstrap_bat_path()],
             cwd=self.cwd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,

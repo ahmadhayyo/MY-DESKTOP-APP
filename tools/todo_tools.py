@@ -10,7 +10,7 @@ then tick items in_progress / completed as it works. The agent should call it:
 
 from __future__ import annotations
 
-from typing import Annotated, Optional
+from typing import Annotated, Any, Dict, List
 
 from langchain_core.tools import tool
 
@@ -20,7 +20,7 @@ from core import todo as _todo
 @tool
 def todo_write(
     todos: Annotated[
-        list,
+        List[Dict[str, Any]],
         "The task list: a list of objects, each {\"id\": \"1\", \"content\": \"...\", "
         "\"status\": \"pending|in_progress|completed|cancelled\"}. Keep ids stable "
         "across calls so updates land on the right item.",

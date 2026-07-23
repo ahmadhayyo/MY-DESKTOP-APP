@@ -228,6 +228,45 @@ def _set_mode(mode: str) -> None:
     cl.user_session.set("chat_mode", "ask" if mode == "ask" else "agent")
 
 
+async def _send_mode_ui(with_banner: bool = True) -> None:
+    """Show the Ask/Agent mode selector (settings gear) and optionally a banner
+    message with one-click buttons. On a FRESH chat we skip the banner so it does
+    not fill the chat and hide Chainlit's starter cards (with_banner=False)."""
+    mode = _get_mode()
+    # 1) Persistent settings-panel selector (gear icon).
+    try:
+        from chainlit.input_widget import Select as _Select
+        await cl.ChatSettings([
+            _Select(
+                id="chat_mode",
+                label="الوضع | Mode",
+                values=["agent", "ask"],
+                initial_value=mode,
+                items={"⚙️ الوكيل — ينفّذ المهام (Agent)": "agent",
+                       "💬 السؤال — دردشة فقط (Ask)": "ask"},
+            ),
+        ]).send()
+    except Exception as _exc:
+        _logger.debug("ChatSettings mode selector skipped: %s", _exc)
+    # 2) Optional banner with clickable buttons (skipped on fresh chat).
+    if not with_banner:
+        return
+    _cur = "⚙️ الوكيل (Agent)" if mode == "agent" else "💬 السؤال (Ask)"
+    try:
+        await cl.Message(
+            content=(f"**الوضع الحالي: {_cur}**\n"
+                     "بدّل من الزرّين بالأسفل (أو من أيقونة الإعدادات ⚙️، أو اكتب `/ask` أو `/agent`):\n"
+                     "• 💬 **Ask** = دردشة/أسئلة فقط، بلا تنفيذ\n"
+                     "• ⚙️ **Agent** = ينفّذ المهام على جهازك"),
+            actions=[
+                cl.Action(name="set_mode", label="💬 وضع السؤال", payload={"mode": "ask"}),
+                cl.Action(name="set_mode", label="⚙️ وضع الوكيل", payload={"mode": "agent"}),
+            ],
+        ).send()
+    except Exception as _exc:
+        _logger.debug("mode banner skipped: %s", _exc)
+
+
 _ASK_SYSTEM = (
     "أنت HAYO في وضع «السؤال» (Ask). أجب مباشرةً وبوضوح على المستخدم بلغته "
     "(عربي/إنجليزي) اعتماداً على معرفتك والمحادثة. هذا وضع محادثة فقط: لا تنفّذ أي "
@@ -993,7 +1032,14 @@ def _progress_fingerprint(values: dict) -> str:
     last_ai = ""
     for m in reversed(msgs):
         if isinstance(m, AIMessage) and not getattr(m, "tool_calls", []):
-            last_ai = (m.content if isinstance(m.content, str) else "")[:160]
+            _c = m.content
+            if not isinstance(_c, str):
+                # Gemini/Anthropic return list-of-blocks content — extract text
+                _c = "\n".join(
+                    (b.get("text", "") if isinstance(b, dict) else str(b))
+                    for b in (_c if isinstance(_c, list) else [])
+                )
+            last_ai = _c[:160]
             break
     return f"{len(msgs)}|{last_ai}"
 
@@ -1584,6 +1630,9 @@ async def _on_pick_workspace(action: cl.Action):
 async def set_starters():
     """Ready-made, organized action cards shown on a new chat (click to run)."""
     return [
+        # ── Mode toggle (Ask / Agent) ──
+        cl.Starter(label="💬 وضع السؤال (Ask)", message="/ask"),
+        cl.Starter(label="⚙️ وضع الوكيل (Agent)", message="/agent"),
         # ── Control & setup ──
         cl.Starter(label="🎛️ لوحة التحكّم", message="/panel"),
         cl.Starter(label="🔄 تغيير النموذج", message="/model"),
@@ -1624,22 +1673,10 @@ async def on_chat_start() -> None:
     cl.user_session.set("audio_buffer", bytearray())
     cl.user_session.set("audio_mime", "audio/webm")
 
-    # ── Ask / Agent mode: default to Agent; expose a persistent selector ──────
+    # ── Ask / Agent mode: default to Agent. Send ONLY the settings gear (no
+    #    banner) so the starter cards stay visible on a fresh chat.
     cl.user_session.set("chat_mode", cl.user_session.get("chat_mode", "agent"))
-    try:
-        from chainlit.input_widget import Select as _Select
-        await cl.ChatSettings([
-            _Select(
-                id="chat_mode",
-                label="الوضع | Mode",
-                values=["agent", "ask"],
-                initial_value=_get_mode(),
-                items={"⚙️ الوكيل — ينفّذ المهام (Agent)": "agent",
-                       "💬 السؤال — دردشة فقط (Ask)": "ask"},
-            ),
-        ]).send()
-    except Exception as _exc:
-        _logger.debug("ChatSettings mode selector skipped: %s", _exc)
+    await _send_mode_ui(with_banner=False)
 
     last_session = _load_last_session()
     last_thread = last_session.get("thread_id")
@@ -1784,6 +1821,8 @@ async def on_chat_resume(thread: dict) -> None:
     cl.user_session.set("voice_name", "salma")
     cl.user_session.set("audio_buffer", bytearray())
     cl.user_session.set("audio_mime", "audio/webm")
+    cl.user_session.set("chat_mode", cl.user_session.get("chat_mode", "agent"))
+    await _send_mode_ui()
 
     # Restore THIS conversation's own workspace from its saved graph state, so
     # continuing it keeps working in the same project folder (not Desktop).

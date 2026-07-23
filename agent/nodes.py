@@ -442,6 +442,8 @@ _CORE_TOOL_NAMES = {
     "type_in_window", "open_settings_page",
     "power_action", "get_system_details", "app_exists",
     "launch_app_smart",
+    # ── Locate anything on the PC (all drives) ─────────────────────────────
+    "find_on_computer",
     # ── Web research (CAPTCHA-free) ────────────────────────────────────────
     "web_search", "web_answer", "read_webpage",
     # ── Computer use ───────────────────────────────────────────────────────
@@ -449,34 +451,66 @@ _CORE_TOOL_NAMES = {
     # ── Office PRO (Word / Excel / PowerPoint) ─────────────────────────────
     "excel_set_formula", "excel_add_total_row", "excel_add_chart", "excel_style_report",
     "word_add_heading", "word_add_paragraph", "word_add_table", "word_add_list", "word_set_rtl",
-    "ppt_create", "ppt_add_bullets", "ppt_add_table", "ppt_add_chart", "ppt_set_theme",
     "convert_word_to_pdf", "convert_excel_to_pdf",
     # ── Integrations ───────────────────────────────────────────────────────
-    "send_email", "http_request", "telegram_bot_send",
+    "send_email", "http_request",
     # ── API key & endpoint verification ────────────────────────────────────
-    "test_api_key", "test_env_api_keys", "test_endpoint",
+    "test_api_key",
     # ── Android device control (ADB) ────────────────────────────────────────
     "android_devices", "android_device_info", "android_screenshot",
     "android_tap", "android_swipe", "android_input_text", "android_key_event",
     "android_list_apps", "android_launch_app", "android_shell",
+    "android_install_apk", "android_uninstall_app",
     # ── Long-term memory + scheduler ───────────────────────────────────────
     "remember_fact", "recall_facts", "list_memory",
     "schedule_task", "list_scheduled_tasks", "cancel_scheduled_task",
-    # ── Telegram (user account) ────────────────────────────────────────────
-    "telegram_search", "telegram_search_files", "telegram_download",
-    "telegram_status", "telegram_login", "telegram_verify_code",
-    # ── Markets (kept in extras; reachable via run_powershell if needed) ──
     # ── Desktop app builder ────────────────────────────────────────────────
     "build_desktop_app", "lint_python", "build_exe", "run_executable",
     # ── Capability forge (self-extension) ──────────────────────────────────
     "forge_tool", "list_forged_tools", "inspect_forged_tool",
-    # ── GitHub ─────────────────────────────────────────────────────────────
-    "github_clone", "github_status", "github_commit_push", "github_pull",
-    "github_branch", "github_create_repo",
-    # ── Railway (deployment monitoring) ───────────────────────────────────
-    "railway_status", "railway_projects", "railway_services",
-    "railway_deployments", "railway_logs", "railway_redeploy",
+    # ── Live todo list (Claude-Code-style self-updating checklist) ─────────
+    "todo_write", "todo_read",
+    # ── Persistent terminal session (cwd/env/venv persist across steps) ────
+    "terminal_run", "terminal_reset",
+    # ── Skills (reusable task methodologies) ────────────────────────────────
+    "list_skills", "load_skill",
+    # ── Sub-agents (delegate a focused subtask) ─────────────────────────────
+    "spawn_subagent",
+    # ── True vision (see the screen / an image, not just OCR) ──────────────
+    "analyze_screen", "analyze_image",
+    # NOTE: Telegram/GitHub/Railway/PowerPoint tools remain FULLY REGISTERED
+    # and callable — they are simply not in this always-bound shortlist, since
+    # providers with a hard tool-count cap (OpenAI/Groq/DeepSeek, currently 128)
+    # can't be sent every one of 265 tools every call. Providers with no such
+    # cap (see _PROVIDERS_NO_TOOL_CAP below) receive the FULL toolset regardless,
+    # so nothing is ever actually unavailable — see _tools_for_provider().
 }
+
+# Providers confirmed (via live testing) to accept the FULL tool registry with
+# no vendor-imposed count limit — these get every registered tool, no curation,
+# no artificial restriction. OpenAI/Groq/DeepSeek hard-cap at 128 (measured);
+# Google/Gemini was verified to accept 265 tools and select correctly among them.
+_PROVIDERS_NO_TOOL_CAP = {"google"}
+
+
+def tools_for_provider(tools: list, provider: str | None = None) -> list:
+    """Return the tool list to bind for `provider` (defaults to the active one).
+
+    Single source of truth for provider-aware tool selection, used by BOTH the
+    main worker binding and spawn_subagent — so a sub-agent can never exceed a
+    capped provider's hard limit (this was a real bug: sub-agents used to bind
+    ALL ~264 tools unconditionally, which threw a 400 error on OpenAI/Groq/
+    DeepSeek). No tool is ever removed from the registry by this — it only
+    decides what is bound on a given call.
+    """
+    prov = (provider or _PROVIDER).lower().strip()
+    if prov in _PROVIDERS_NO_TOOL_CAP:
+        return tools
+    if prov == "ollama":
+        return _select_tools_for_ollama(tools)
+    if prov == "groq":
+        return _select_tools_for_groq(tools)
+    return _select_tools(tools, budget=126)
 
 
 def _select_tools(tools: list, budget: int) -> list:
@@ -539,12 +573,9 @@ def _build_tools_binding():
         #              alone — ~25,000 tokens — impossible to fit; see
         #              _select_tools_for_groq for the measured breakdown)
         #  • others  → ≤126 (Groq/OpenAI/DeepSeek hard-limit is 128; margin of safety)
-        if _PROVIDER == "ollama":
-            active_tools = _select_tools_for_ollama(active_tools)
-        elif _PROVIDER == "groq":
-            active_tools = _select_tools_for_groq(active_tools)
-        else:
-            active_tools = _select_tools(active_tools, budget=126)
+        #  • Google/Gemini → NO cap (verified live: accepts all 265 tools and
+        #              selects correctly) — see tools_for_provider().
+        active_tools = tools_for_provider(active_tools)
         try:
             return main.bind_tools(active_tools)
         except Exception as exc:
@@ -1150,6 +1181,37 @@ Examples that are CONVERSATIONAL_ONLY (NO tools):
 If the user wants a TASK done ON THE COMPUTER (files, apps, web, system):
   Write a short numbered plan with the CORRECT tool for each step.
 
+منهجية العمل الذاتي (AUTONOMOUS WORK ETHIC — طبّقها دائماً):
+  • حلّل بعمق قبل التنفيذ: لمهام المشاريع، اقرأ وافهم البنية أولاً وكوّن مخرجات فهم
+    كاملة، ثم خطّط للإصلاح/التطوير.
+  • حُلّ العوائق بنفسك ولا تتوقف لتسأل: مكتبة بايثون ناقصة → ثبّتها
+    (terminal_run: python -m pip install X).
+  • تحتاج تطبيقاً/برنامجاً/ملفاً معيّناً أثناء المهمة؟ اتّبع هذا الترتيب حرفياً:
+      ١) ابحث عنه في الحاسوب كله أولاً: find_on_computer(name='...', kind='app')
+         — يفحص كل الأقراص والمجلدات (حتى المجلدات الفرعية على سطح المكتب).
+      ٢) إن وُجد → افتحه/استثمره (launch_app_smart أو run_executable بالمسار).
+      ٣) إن وُجد لكنه قديم → حدّثه (عبر الويب/مثبّته).
+      ٤) إن لم يُوجد نهائياً (find_on_computer أرجع لا شيء، جرّب deep=True) → عندها فقط
+         حمّله من الويب. القاعدة الذهبية للتحميل: **استخدم download_file(url, dest)
+         برابط تنزيل مباشر** — لا تكشط روابط صفحات المتصفح (هشّ ويفشل غالباً بسبب
+         التحميل الكسول). كيف تجد الرابط المباشر:
+           • أداة على GitHub؟ الرابط الثابت الأقوى (بلا كشط، يتبع كل التحويلات):
+             https://github.com/<owner>/<repo>/releases/latest/download/<asset>
+             مثال jq: download_file(url='https://github.com/jqlang/jq/releases/latest/download/jq-win64.exe', dest='<المشروع>/jq.exe')
+           • غير ذلك؟ web_search عن "اسم البرنامج direct download url" ثم download_file
+             بالرابط المباشر (.exe/.zip/.msi). فقط إن تعذّر رابط مباشر، استخدم
+             browser_download_to_desktop كخطة أخيرة.
+         بعد التحميل: إن كان .zip فُكّه (unzip_file). ⚠️ برنامج نزّلته للتو **ليس في
+         PATH** — لا تشغّله باسمه المجرّد أبداً (مثل 'jq') فسيفشل بـ"غير معروف".
+         شغّله **بمساره الكامل** دائماً:
+           terminal_run(command='"C:\\...\\jq.exe" --version')   ← لاحظ علامات الاقتباس
+           أو run_executable(path='C:\\...\\jq.exe', args='--version')
+         ملف exe محمول لا يحتاج "تثبيت" — تشغيله بمساره كافٍ.
+  • لا أداة تناسب حاجة فرعية → forge_tool لبناء واحدة.
+  • اختبر فعلياً بعد البناء/الإصلاح: شغّل، وللواجهات analyze_screen، ولتطبيقات
+    الأندرويد استخدم المحاكي (android_*). إن ظهر خطأ أصلحه وأعد الاختبار حتى ينجح.
+  • لا تعلن الاكتمال إلا بعد نجاح كل الاختبارات، ثم اكتب تقريراً منهجياً بما فعلت.
+
 TOOL SELECTION RULES (choose the right tool from the start):
 • 📨 Telegram — search chats/groups or find/download files ("ابحث في تيليجرام", "حمّل من قناة")
   → ALWAYS use the API tools: telegram_search(query) / telegram_search_files(query, file_type)
@@ -1165,7 +1227,7 @@ TOOL SELECTION RULES (choose the right tool from the start):
   does the whole pipeline in one call: writes the code, lints it, and compiles a
   professional .exe to the Desktop. Prefer tkinter (built-in, no extra installs).
   For finer control: scaffold_desktop_app → lint_python → build_exe → run_executable.
-  If a build needs a library, install it (run_powershell: pip install X) then build.
+  If a build needs a library, install it (run_powershell: python -m pip install X) then build.
 • 🔥 NO existing tool fits the task? → BUILD one: forge_tool(tool_name, description,
   python_code). Write a complete @tool function (returns a string), and it becomes
   a permanent, live capability you can call on the very next step. Use this instead
@@ -1585,6 +1647,54 @@ def _already_read_paths(messages: list) -> list[str]:
     return seen
 
 
+# Matches an AIMessage whose ENTIRE text content is just "some_name(args)" —
+# i.e. the model wrote what LOOKS like a tool invocation as plain text instead
+# of actually calling a real bound tool. Confirmed live (2026-07): the reviewer
+# suggesting a plausible-but-nonexistent tool name (e.g. 'install_package') can
+# make the worker echo that name as inert text rather than mapping it to a real
+# tool (terminal_run/run_powershell) — accomplishing nothing while looking like
+# progress. A prompt-only fix reduces but does not reliably eliminate this (LLM
+# behaviour is probabilistic), so this is a deterministic, code-level detector
+# — same pattern as the doom-loop/verify-gate nudges elsewhere in this file.
+import re as _re_module
+_FAKE_TOOL_CALL_RE = _re_module.compile(r"^[A-Za-z_][A-Za-z0-9_]*\([^\n]{0,300}\)\.?\s*$")
+
+
+def _content_to_text(content) -> str:
+    """Normalise an LLM message's content to plain text.
+
+    CRITICAL for Gemini/Anthropic: they return content as a LIST of blocks
+    (``[{"type": "text", "text": "..."}, ...]``), NOT a bare string. Code that
+    did ``content if isinstance(content, str) else ""`` silently produced an
+    EMPTY string under Gemini — which made the reviewer's verdict text vanish, so
+    it could never emit TASK_COMPLETE and every task ran until the iteration cap
+    (the agent "wandering" and never finishing under Gemini). Always route
+    reviewer/worker content through this.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, str):
+                parts.append(b)
+            elif isinstance(b, dict):
+                t = b.get("text") or b.get("content") or ""
+                if t:
+                    parts.append(str(t))
+        return "\n".join(parts)
+    return str(content) if content is not None else ""
+
+
+def _looks_like_fake_tool_call(text: str) -> bool:
+    if not text:
+        return False
+    t = text.strip()
+    if not t or len(t) > 300:
+        return False
+    return bool(_FAKE_TOOL_CALL_RE.match(t))
+
+
 def _plan_is_done(plan: list, completed: list) -> bool:
     """Best-effort: has the worker reached the end of the plan?"""
     if not plan:
@@ -1650,7 +1760,7 @@ def planner_node(state: AgentState) -> dict:
     _latest_human = ""
     for _m in reversed(state.get("messages", [])):
         if isinstance(_m, HumanMessage):
-            _latest_human = _m.content if isinstance(_m.content, str) else ""
+            _latest_human = _content_to_text(_m.content)
             break
     _prev_plan = state.get("plan", [])
     _prev_task = state.get("task_id", "")
@@ -1696,7 +1806,7 @@ def planner_node(state: AgentState) -> dict:
             _chat_sys = SystemMessage(content=_CHAT_SYSTEM)
             _chat_resp = _safe_llm_invoke(
                 _get_main_llm, _sanitize_messages([_chat_sys] + messages), label="Chat")
-            _chat_text = _chat_resp.content if isinstance(_chat_resp.content, str) else ""
+            _chat_text = _content_to_text(_chat_resp.content)
         except Exception as _exc:
             logger.debug("[Planner] fast chat failed, falling back to planner: %s", _exc)
             _chat_text = ""
@@ -1752,6 +1862,23 @@ def planner_node(state: AgentState) -> dict:
             "read them again (reuse what you already saw). Only read NEW or CHANGED "
             "files:\n" + "\n".join(f"  - {p}" for p in _read_paths[-20:])
         )
+    # ── Auto-skill: match the request to a proven methodology and inject its
+    #    steps so the agent follows the right recipe automatically (deep, correct
+    #    analysis by default instead of improvising each time). ──────────────────
+    try:
+        from core import skills as _skills
+        _relevant = _skills.find_relevant(_latest_human, limit=1)
+        if _relevant:
+            _sk = _relevant[0]
+            ctx_parts.append(
+                f"🧩 SKILL — تنطبق مهارة «{_sk.name}» على هذا الطلب. اتبع منهجيتها "
+                f"بدقة (يمكنك أيضاً استدعاء load_skill('{_sk.name}') لمرجع كامل):\n"
+                + _sk.body[:1200]
+            )
+            logger.info("[Planner] Auto-skill: injected '%s' methodology.", _sk.name)
+    except Exception as _exc:
+        logger.debug("[Planner] auto-skill skipped: %s", _exc)
+
     session_ctx = ""
     if ctx_parts:
         session_ctx = (
@@ -1761,7 +1888,7 @@ def planner_node(state: AgentState) -> dict:
 
     system = SystemMessage(content=_PLANNER_SYSTEM + session_ctx)
     response = _safe_llm_invoke(_get_main_llm, _sanitize_messages([system] + messages), label="Planner")
-    content  = response.content if isinstance(response.content, str) else ""
+    content  = _content_to_text(response.content)
 
     # ── Detect conversational response ────────────────────────────────────────
     if "CONVERSATIONAL_ONLY" in content:
@@ -2075,7 +2202,18 @@ def worker_node(state: AgentState) -> dict:
         "5. لا تكرر نفس الأداة بنفس المعاملات. إذا فشلت — جرب نهجاً مختلفاً تماماً.\n"
         "⛔ محظور تماماً — الهلوسة:\n"
         "   لا تكتب أبداً 'تم التنفيذ' أو 'نجح' أو 'أديت هذه الخطوة' بدون استدعاء أداة فعلية.\n"
-        "   لا تصف ما ستفعله — افعله. استدعاء الأداة هو الفعل الوحيد المقبول.\n\n"
+        "   لا تصف ما ستفعله — افعله. استدعاء الأداة هو الفعل الوحيد المقبول.\n"
+        "   ⚠️ لا تكتب أبداً نصاً يشبه استدعاء أداة (مثل 'install_package(...)' أو أي "
+        "'اسم_دالة(معاملات)') كـ**نص عادي** — هذا هلوسة أخطر لأنه يبدو كتنفيذ ولا "
+        "يكون كذلك. إن اقترح المراجع اسم أداة لا تعرفها ضمن أدواتك المتاحة، لا تكتب "
+        "اسمها حرفياً — استخدم أقرب أداة حقيقية تحقق نفس الغرض فعلياً واستدعِها كأداة:\n"
+        "     تثبيت مكتبة بايثون ناقصة → terminal_run(command=\"python -m pip install <name>\") "
+        "أو run_powershell(command=\"python -m pip install <name>\") — لا يوجد أداة اسمها "
+        "install_package أو pip_install.\n"
+        "     تحميل برنامج/ملف من الويب → web_search ثم download_file/browser_download_to_desktop.\n"
+        "   ⚠️ todo_write: لا تُعلّم أي بند 'completed' إلا بعد أن يؤكّد ناتج أداة "
+        "حقيقية (ToolMessage) أن تلك الخطوة نجحت فعلاً. تعليم بند كمكتمل قبل التحقق "
+        "= هلوسة في تتبّع تقدّمك، وستُكتشف عند التحقق النهائي.\n\n"
         "📸 قاعدة ما بعد فتح التطبيق:\n"
         "   إذا نفّذت start-process أو launch_app_smart أو أي أمر لفتح تطبيق:\n"
         "   الخطوة التالية الإلزامية = screen_describe()\n"
@@ -2274,6 +2412,28 @@ def worker_node(state: AgentState) -> dict:
     if _loop_nudge_msg is not None:
         worker_messages = worker_messages + [_loop_nudge_msg]
 
+    # ── Fake-tool-call guard (deterministic, code-level) ───────────────────────
+    # If the model's last turn had NO tool_calls but its text is just
+    # "some_name(args)" — i.e. it wrote what looks like a tool invocation
+    # instead of actually calling a real bound tool — call it out explicitly
+    # and force it to pick a real tool this turn. See _looks_like_fake_tool_call.
+    try:
+        for _m in reversed(messages):
+            if isinstance(_m, AIMessage):
+                _txt = _content_to_text(_m.content)
+                if not getattr(_m, "tool_calls", []) and _looks_like_fake_tool_call(_txt):
+                    from langchain_core.messages import HumanMessage as _HM4
+                    worker_messages = worker_messages + [_HM4(content=(
+                        f"[تصحيح إلزامي] كتبت '{_txt.strip()[:120]}' كنصّ عادي — هذا لم "
+                        "ينفّذ أي شيء (لا يوجد استدعاء أداة حقيقي هناك). إن كان القصد تثبيت "
+                        "مكتبة، استدعِ الآن أداة حقيقية فعلياً: "
+                        "terminal_run(command=\"python -m pip install <الاسم>\") — وإلا اختر أقرب "
+                        "أداة حقيقية من أدواتك المتاحة ونفّذها الآن كاستدعاء أداة فعلي."
+                    ))]
+                break
+    except Exception as _exc:
+        logger.debug("[Worker] fake-tool-call guard skipped: %s", _exc)
+
     # ── Verify-after-edit nudge ───────────────────────────────────────────────
     # If the most recent successful code edit was never run/tested, steer THIS
     # call toward executing it (explore→edit→verify). LLM-input only; not
@@ -2432,7 +2592,7 @@ def worker_node(state: AgentState) -> dict:
             # Force it onto the Telethon API tools instead, and stop the loop.
             _tg_words = ["telegram", "تلجرام", "تليجرام", "التلجرام", "التليجرام", "تيليجرام"]
             _ctx = " ".join(
-                (m.content if isinstance(m.content, str) else "")
+                _content_to_text(m.content)
                 for m in (messages[-6:] + new_messages[-6:])
             ).lower()
             _task_tg = any(w in _ctx for w in _tg_words)
@@ -2559,7 +2719,7 @@ def worker_node(state: AgentState) -> dict:
                 and "start-sleep" in str(tool_args.get("command", "")).lower()
             )
             _recent_msgs_text = " ".join(
-                (m.content if isinstance(m.content, str) else "")
+                _content_to_text(m.content)
                 for m in new_messages[-10:]
             ).lower()
             _verification_context = any(kw in _recent_msgs_text for kw in [
@@ -2872,6 +3032,12 @@ CONTINUE:
 استمرار إلى الخطوة التالية...
 
 الأداة التالية على نفس السطر مع CONTINUE: أو لا تكتب CONTINUE أصلاً.
+
+⚠️ لا تخترع اسم أداة غير موجود فعلياً (مثال خطأ شائع: 'install_package'، 'pip_install' —
+لا وجود لهما). لتثبيت مكتبة بايثون ناقصة، الأداة الصحيحة الوحيدة هي:
+CONTINUE: terminal_run(command="python -m pip install <اسم_المكتبة>")
+إن لم تكن متأكداً من اسم أداة حقيقي، اكتب اسم أداة عامة تعرفها بيقين (terminal_run/
+run_powershell/run_python) بدل اختراع اسم — العامل لا يملك أداة باسم تخترعه أنت.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ⚡ قاعدة إكمال الخطوات (حرجة — أعلى أولوية على أي قاعدة نجاح):
@@ -3154,7 +3320,7 @@ def reviewer_node(state: AgentState) -> dict:
 
     # ── Strip verdict prefixes — keep verdict for should_continue() logic
     #    but put the user-friendly summary in a separate clean message ─────────
-    raw_content = response.content if isinstance(response.content, str) else ""
+    raw_content = _content_to_text(response.content)
 
     # ── Check for duplicate review message ───────────────────────────────────
     if is_duplicate_message(response, messages, min_length=50):
@@ -3405,7 +3571,7 @@ def should_continue(state: AgentState) -> Literal["worker", "planner", "__end__"
     # ── Check last reviewer AI message ───────────────────────────────────────
     for msg in reversed(messages):
         if isinstance(msg, AIMessage) and not getattr(msg, "tool_calls", []):
-            content = msg.content if isinstance(msg.content, str) else ""
+            content = _content_to_text(msg.content)
             # Also check the original verdict stored in metadata (verdict
             # prefixes are stripped from content for clean display)
             original = ""

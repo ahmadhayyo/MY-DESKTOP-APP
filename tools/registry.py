@@ -397,6 +397,15 @@ def _load_vision():
 _import_category("vision", _load_vision)
 
 # ═══════════════════════════════════════════════════════════
+# LOCATE — find any file/app anywhere on the computer (all drives)
+# ═══════════════════════════════════════════════════════════
+def _load_locate():
+    from tools.locate_tools import find_on_computer
+    return [find_on_computer]
+
+_import_category("locate", _load_locate)
+
+# ═══════════════════════════════════════════════════════════
 # TODO — live self-updating task checklist (Claude-Code style)
 # ═══════════════════════════════════════════════════════════
 def _load_todo():
@@ -413,6 +422,24 @@ def _load_terminal():
     return [terminal_run, terminal_reset]
 
 _import_category("terminal", _load_terminal)
+
+# ═══════════════════════════════════════════════════════════
+# SKILLS — reusable task methodologies (Claude-Code-style)
+# ═══════════════════════════════════════════════════════════
+def _load_skills():
+    from tools.skill_tools import list_skills, load_skill
+    return [list_skills, load_skill]
+
+_import_category("skills", _load_skills)
+
+# ═══════════════════════════════════════════════════════════
+# SUB-AGENTS — delegate a focused subtask to an isolated mini-agent
+# ═══════════════════════════════════════════════════════════
+def _load_subagent():
+    from tools.subagent_tools import spawn_subagent
+    return [spawn_subagent]
+
+_import_category("subagent", _load_subagent)
 
 # ═══════════════════════════════════════════════════════════
 # WINDOWS POWER — Deep Windows OS control

@@ -18,6 +18,15 @@ from langchain_core.tools import tool
 from config import DESKTOP_DIR
 
 
+def _ch_encodable(ch: str, enc: str) -> bool:
+    """True if `ch` can be encoded in `enc` (a Windows console code page)."""
+    try:
+        ch.encode(enc)
+        return True
+    except Exception:
+        return False
+
+
 def _resolve_path(p: str) -> Path:
     """Expand shortcuts ('desktop:', 'downloads:'), ~, env vars → absolute Path.
 
@@ -201,6 +210,29 @@ def run_script(
             output += f"\n[STDERR] {result.stderr.strip()}"
         if result.returncode != 0:
             output = f"[EXIT CODE {result.returncode}]\n{output}"
+
+        # ── Portability warning: this runner's console is UTF-8, but the user's
+        #    default Windows console is often a legacy code page (e.g. cp1256).
+        #    If the program printed characters that CAN'T encode there, the same
+        #    script will crash with UnicodeEncodeError when the user runs it in a
+        #    normal console — surface that now so the agent fixes it during verify.
+        try:
+            import locale as _loc
+            console_enc = _loc.getpreferredencoding(False) or "cp1252"
+            if console_enc.lower().replace("-", "") not in ("utf8", "utf_8"):
+                bad = sorted({ch for ch in (result.stdout or "")
+                              if not _ch_encodable(ch, console_enc)})
+                if bad:
+                    output += (
+                        f"\n[⚠️ PORTABILITY] الإخراج يحتوي أحرفاً لا تُطبَع على وحدة تحكّم "
+                        f"ويندوز الافتراضية ({console_enc}): {' '.join(bad[:8])} — سيتعطّل "
+                        "البرنامج بـ UnicodeEncodeError عند تشغيل المستخدم له في console عادي. "
+                        "أصلحه: استبدل هذه الأحرف بنص ASCII، أو أضف في بداية البرنامج "
+                        "sys.stdout.reconfigure(encoding='utf-8'), أو اكتب المخرجات لملف UTF-8."
+                    )
+        except Exception:
+            pass
+
         return output or "[OK] Script executed (no output)"
     except subprocess.TimeoutExpired:
         return f"[ERROR] Script timed out after {timeout}s"

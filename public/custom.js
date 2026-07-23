@@ -98,3 +98,65 @@
     start();
   }
 })();
+
+/* ============================================================================
+ * HAYO — Animated welcome / splash screen with a "ابدأ" (Start) button.
+ * Shows once per page load; the Start button fades it out to reveal the chat.
+ * ==========================================================================*/
+(function () {
+  "use strict";
+  if (window.__hayoSplashDone) return;
+  window.__hayoSplashDone = true;
+  // Show once per browser session (survives refresh + login route change),
+  // reappears when the user opens the app fresh in a new session.
+  try {
+    if (sessionStorage.getItem("hayoSplashSeen") === "1") return;
+    sessionStorage.setItem("hayoSplashSeen", "1");
+  } catch (e) {}
+
+  var FEATURES = [
+    ["🧠", "تحليل عميق وتخطيط ذكي"],
+    ["🛠️", "أكثر من 265 أداة تنفيذية"],
+    ["👁️", "رؤية حقيقية — يرى الشاشة والصور"],
+    ["🌐", "تحكّم كامل بالمتصفح والويب"],
+    ["🏗️", "بناء مشاريع وتطبيقات EXE"],
+    ["📱", "تحكّم بمحاكي وأجهزة أندرويد"],
+    ["💻", "جلسة طرفية دائمة"],
+    ["🧩", "مهارات جاهزة ووكلاء فرعيون"],
+    ["💬", "وضعا السؤال (Ask) والوكيل (Agent)"],
+    ["🔓", "يعمل بحرية حتى إنجاز المهمة"]
+  ];
+
+  function build() {
+    if (document.getElementById("hayo-splash")) return;
+
+    var s = document.createElement("div");
+    s.id = "hayo-splash";
+
+    var feats = FEATURES.map(function (f, i) {
+      return '<div class="hayo-feat" style="animation-delay:' + (0.35 + i * 0.06) +
+        's"><span>' + f[0] + "</span><div>" + f[1] + "</div></div>";
+    }).join("");
+
+    s.innerHTML =
+      '<div class="hayo-orbit"></div><div class="hayo-orbit two"></div>' +
+      '<img class="hayo-logo" src="/public/logo_dark.png" alt="HAYO" />' +
+      "<h1>HAYO AI AGENT</h1>" +
+      '<div class="hayo-tag">وكيلك الذكي الخارق — يفكّر، يخطّط، ينفّذ، ويتحقّق</div>' +
+      '<div class="hayo-feats">' + feats + "</div>" +
+      '<button class="hayo-start" id="hayo-start-btn">ابدأ ▸</button>';
+
+    document.body.appendChild(s);
+
+    document.getElementById("hayo-start-btn").addEventListener("click", function () {
+      s.classList.add("hayo-hide");
+      setTimeout(function () { if (s && s.parentNode) s.parentNode.removeChild(s); }, 550);
+    });
+  }
+
+  function ready() {
+    if (document.body) { build(); }
+    else { setTimeout(ready, 60); }
+  }
+  ready();
+})();
