@@ -35,28 +35,8 @@ MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "google").lower().strip()
 console = Console()
 
 
-from config import _is_placeholder  # noqa: E402 — reuse canonical version
-
-
-def assert_keys_present() -> None:
-    if MODEL_PROVIDER == "ollama":
-        return
-    key_map = {
-        "anthropic": "ANTHROPIC_API_KEY",
-        "google": "GOOGLE_API_KEY",
-        "openai": "OPENAI_API_KEY",
-        "deepseek": "DEEPSEEK_API_KEY",
-        "groq": "GROQ_API_KEY",
-    }
-    var_name = key_map.get(MODEL_PROVIDER)
-    if var_name:
-        val = os.getenv(var_name, "")
-        if _is_placeholder(val):
-            raise RuntimeError(
-                f"MODEL_PROVIDER='{MODEL_PROVIDER}' but {var_name} is empty or "
-                f"contains a placeholder value in .env\n"
-                f"Tip: set MODEL_PROVIDER=ollama for free local AI (no API key needed)."
-            )
+# Reuse the canonical key-check and iteration limit from config (single source).
+from config import assert_keys_present, MAX_ITERATIONS  # noqa: E402
 
 
 def _print_response(state: dict) -> None:
@@ -70,7 +50,13 @@ def _print_response(state: dict) -> None:
 
 
 async def run_one(graph, message: str, thread_id: str) -> None:
-    config = {"configurable": {"thread_id": thread_id}}
+    # recursion_limit must exceed what MAX_ITERATIONS consumes (~2 super-steps per
+    # iteration), otherwise LangGraph's default of 25 stops the agent after ~12
+    # iterations mid-task. Mirror the value used by the Chainlit app (app.py).
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": max(50, MAX_ITERATIONS * 2 + 25),
+    }
     initial = {
         "messages": [HumanMessage(content=message)],
         "plan": [],

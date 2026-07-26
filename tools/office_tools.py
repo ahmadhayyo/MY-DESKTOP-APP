@@ -13,6 +13,8 @@ import os
 from pathlib import Path
 from langchain_core.tools import tool
 
+from config import resolve_output_path
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  EXCEL TOOLS
@@ -34,30 +36,49 @@ def excel_create(path: str, data: str, sheet_name: str = "Sheet1") -> str:
     except ImportError:
         return "Error: openpyxl not installed. Run: pip install openpyxl"
 
-    try:
-        rows = json.loads(data) if isinstance(data, str) else data
-    except json.JSONDecodeError:
-        return f"Error: invalid JSON data"
+    # Parse JSON if given a string, but keep a raw string fallback (the data may be
+    # a plain CSV/TSV block, not JSON).
+    rows = data
+    if isinstance(data, str):
+        try:
+            rows = json.loads(data)
+        except json.JSONDecodeError:
+            rows = data  # treat as a raw CSV/TSV document → normalize_table splits it
+
+    # Normalize into a clean 2-D grid AND repair any garbled Arabic (mojibake).
+    # This fixes two real failures: (a) CSV strings dumped into a single column,
+    # (b) Arabic written through a wrong code page showing up as "ط§ظ„ظ‚ط³ظ…".
+    from core.text_repair import normalize_table
+    grid = normalize_table(rows)
+    if not grid:
+        return "Error: data must be list of lists, list of dicts, or CSV text"
 
     wb = Workbook()
     ws = wb.active
     ws.title = sheet_name
+    for row in grid:
+        ws.append(list(row))
 
-    if rows and isinstance(rows[0], dict):
-        headers = list(rows[0].keys())
-        ws.append(headers)
-        for row in rows:
-            ws.append([row.get(h, "") for h in headers])
-    elif rows and isinstance(rows[0], (list, tuple)):
-        for row in rows:
-            ws.append(list(row))
-    else:
-        return "Error: data must be list of lists or list of dicts"
+    # Light professional touch: bold header + autofit so the result is readable.
+    try:
+        from openpyxl.styles import Font
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+        widths: dict = {}
+        for r in ws.iter_rows():
+            for c in r:
+                if c.value is not None:
+                    widths[c.column_letter] = max(widths.get(c.column_letter, 0), len(str(c.value)))
+        for col, w in widths.items():
+            ws.column_dimensions[col].width = min(max(w + 2, 10), 60)
+        ws.freeze_panes = "A2"
+    except Exception:
+        pass
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     p.parent.mkdir(parents=True, exist_ok=True)
     wb.save(str(p))
-    return f"Excel file created: {p} ({len(rows)} rows)"
+    return f"✅ Excel file created: {p} ({len(grid)} rows × {len(grid[0]) if grid else 0} cols)"
 
 
 @tool
@@ -73,7 +94,7 @@ def excel_read(path: str, sheet_name: str = "") -> str:
     except ImportError:
         return "Error: openpyxl not installed. Run: pip install openpyxl"
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     if not p.exists():
         return f"Error: file not found: {path}"
 
@@ -121,7 +142,7 @@ def excel_edit(path: str, cell: str, value: str, sheet_name: str = "") -> str:
     except ImportError:
         return "Error: openpyxl not installed. Run: pip install openpyxl"
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     if not p.exists():
         return f"Error: file not found: {path}"
 
@@ -152,7 +173,7 @@ def excel_add_rows(path: str, data: str, sheet_name: str = "") -> str:
     except ImportError:
         return "Error: openpyxl not installed. Run: pip install openpyxl"
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     if not p.exists():
         return f"Error: file not found: {path}"
 
@@ -196,7 +217,7 @@ def excel_add_column(path: str, header: str, formula_or_values: str, sheet_name:
     except ImportError:
         return "Error: openpyxl not installed. Run: pip install openpyxl"
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     if not p.exists():
         return f"Error: file not found: {path}"
 
@@ -243,6 +264,11 @@ def word_create(path: str, content: str, title: str = "") -> str:
     except ImportError:
         return "Error: python-docx not installed. Run: pip install python-docx"
 
+    # Repair any garbled Arabic (mojibake) before writing.
+    from core.text_repair import fix_mojibake
+    content = fix_mojibake(content)
+    title = fix_mojibake(title)
+
     doc = Document()
 
     if title:
@@ -266,7 +292,7 @@ def word_create(path: str, content: str, title: str = "") -> str:
         else:
             doc.add_paragraph(stripped)
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     p.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(p))
     return f"Word file created: {p}"
@@ -284,7 +310,7 @@ def word_read(path: str) -> str:
     except ImportError:
         return "Error: python-docx not installed. Run: pip install python-docx"
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     if not p.exists():
         return f"Error: file not found: {path}"
 
@@ -332,7 +358,7 @@ def word_edit(path: str, find_text: str, replace_text: str) -> str:
     except ImportError:
         return "Error: python-docx not installed. Run: pip install python-docx"
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     if not p.exists():
         return f"Error: file not found: {path}"
 
@@ -366,7 +392,7 @@ def pdf_read(path: str, max_pages: int = 50) -> str:
     except ImportError:
         return "Error: pypdf not installed. Run: pip install pypdf"
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     if not p.exists():
         return f"Error: file not found: {path}"
 
@@ -404,7 +430,7 @@ def pdf_create(path: str, content: str, title: str = "") -> str:
     except ImportError:
         return "Error: reportlab not installed. Run: pip install reportlab"
 
-    p = Path(path)
+    p = Path(resolve_output_path(path))
     p.parent.mkdir(parents=True, exist_ok=True)
 
     doc = SimpleDocTemplate(str(p), pagesize=A4)
@@ -455,7 +481,7 @@ def pdf_merge(paths: str, output_path: str) -> str:
             return f"Error: file not found: {fp}"
         writer.append(fp)
 
-    out = Path(output_path)
+    out = Path(resolve_output_path(output_path))
     out.parent.mkdir(parents=True, exist_ok=True)
     writer.write(str(out))
     return f"Merged {len(file_list)} PDFs into: {out}"
@@ -477,7 +503,7 @@ def convert_excel_to_pdf(excel_path: str, pdf_path: str) -> str:
     except ImportError:
         return "Error: openpyxl and reportlab required. Run: pip install openpyxl reportlab"
 
-    p = Path(excel_path)
+    p = Path(resolve_output_path(excel_path))
     if not p.exists():
         return f"Error: file not found: {excel_path}"
 
@@ -491,7 +517,7 @@ def convert_excel_to_pdf(excel_path: str, pdf_path: str) -> str:
     if not data:
         return "Error: spreadsheet is empty"
 
-    out = Path(pdf_path)
+    out = Path(resolve_output_path(pdf_path))
     out.parent.mkdir(parents=True, exist_ok=True)
 
     doc = SimpleDocTemplate(str(out), pagesize=landscape(A4))
@@ -526,7 +552,7 @@ def convert_word_to_pdf(word_path: str, pdf_path: str) -> str:
     except ImportError:
         return "Error: python-docx and reportlab required. Run: pip install python-docx reportlab"
 
-    p = Path(word_path)
+    p = Path(resolve_output_path(word_path))
     if not p.exists():
         return f"Error: file not found: {word_path}"
 
@@ -547,7 +573,7 @@ def convert_word_to_pdf(word_path: str, pdf_path: str) -> str:
         else:
             story.append(Paragraph(text, styles["Normal"]))
 
-    out = Path(pdf_path)
+    out = Path(resolve_output_path(pdf_path))
     out.parent.mkdir(parents=True, exist_ok=True)
     pdf_doc = SimpleDocTemplate(str(out), pagesize=A4)
     pdf_doc.build(story)

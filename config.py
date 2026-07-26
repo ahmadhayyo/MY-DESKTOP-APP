@@ -23,11 +23,31 @@ ENV_PATH: Path = ROOT_DIR / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=False)
 
 # ── Logging ──────────────────────────────────────────────────────────────────
+# Console + a rotating file handler so past runs can be debugged after the fact
+# (previously logs were console-only and lost the moment the app closed).
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_DIR: Path = ROOT_DIR / "logs"
+_log_handlers: list[logging.Handler] = [logging.StreamHandler()]
+try:
+    from logging.handlers import RotatingFileHandler
+
+    LOG_DIR.mkdir(exist_ok=True)
+    _file_handler = RotatingFileHandler(
+        LOG_DIR / "hayo.log",
+        maxBytes=int(os.getenv("LOG_MAX_BYTES", str(5 * 1024 * 1024))),  # 5 MB
+        backupCount=int(os.getenv("LOG_BACKUP_COUNT", "5")),
+        encoding="utf-8",
+    )
+    _log_handlers.append(_file_handler)
+except Exception:
+    # File logging is best-effort; never block startup on it.
+    pass
+
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%H:%M:%S",
+    handlers=_log_handlers,
 )
 logger = logging.getLogger("hayo")
 
@@ -72,7 +92,7 @@ if MODEL_PROVIDER not in ("anthropic", "google", "openai", "deepseek", "groq", "
 
 # ── Anthropic ────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY: str = _get("ANTHROPIC_API_KEY")
-ANTHROPIC_AGENT_MODEL: str = _get("ANTHROPIC_AGENT_MODEL", "claude-sonnet-4-20250514")
+ANTHROPIC_AGENT_MODEL: str = _get("ANTHROPIC_AGENT_MODEL", "claude-sonnet-4-6")
 ANTHROPIC_SUMMARIZER_MODEL: str = _get(
     "ANTHROPIC_SUMMARIZER_MODEL", "claude-haiku-4-5-20251001"
 )
@@ -80,7 +100,7 @@ ANTHROPIC_SUMMARIZER_MODEL: str = _get(
 # ── Google Gemini ────────────────────────────────────────────────────────────
 GOOGLE_API_KEY: str = _get("GOOGLE_API_KEY")
 GOOGLE_AGENT_MODEL: str = _get("GOOGLE_AGENT_MODEL", "gemini-2.5-flash")
-GOOGLE_SUMMARIZER_MODEL: str = _get("GOOGLE_SUMMARIZER_MODEL", "gemini-2.0-flash")
+GOOGLE_SUMMARIZER_MODEL: str = _get("GOOGLE_SUMMARIZER_MODEL", "gemini-2.5-flash-lite")
 
 # ── OpenAI (ChatGPT) ────────────────────────────────────────────────────────
 OPENAI_API_KEY: str = _get("OPENAI_API_KEY")
@@ -108,17 +128,67 @@ MAX_ITERATIONS: int = min(_get_int("MAX_ITERATIONS", 50), 500)
 MAX_HISTORY: int = min(_get_int("MAX_HISTORY", 30), 300)
 PS_TIMEOUT: int = min(_get_int("PS_TIMEOUT", 120), 300)
 
+# ── Agent loop robustness (Phase 1: loop detection + context compaction) ─────
+# LOOP_*: consecutive identical tool calls that trigger a nudge / a hard stop.
+# TOOL_OUTPUT_TOKEN_BUDGET: newest tool outputs kept fully intact within this
+#   rolling token budget; older ones are replaced with a one-line placeholder.
+# PRUNE_MIN_SAVINGS: skip pruning unless it saves at least this many tokens.
+LOOP_WARNING_THRESHOLD: int = min(_get_int("LOOP_WARNING_THRESHOLD", 3), 20)
+LOOP_HALT_THRESHOLD: int = min(_get_int("LOOP_HALT_THRESHOLD", 5), 30)
+TOOL_OUTPUT_TOKEN_BUDGET: int = min(_get_int("TOOL_OUTPUT_TOKEN_BUDGET", 40_000), 200_000)
+PRUNE_MIN_SAVINGS: int = min(_get_int("PRUNE_MIN_SAVINGS", 8_000), 100_000)
+
 # ── Workspace / downloads ───────────────────────────────────────────────────
 DEFAULT_WORKSPACE: Path = Path(_get("DEFAULT_WORKSPACE", str(ROOT_DIR)))
 DESKTOP_DIR: Path = Path(_get("DESKTOP_DIR", str(Path.home() / "Desktop")))
 DOWNLOADS_DIR: Path = Path(_get("DOWNLOADS_DIR", str(Path.home() / "Downloads")))
+
+
+def resolve_output_path(p: str) -> str:
+    """Resolve a user/model-supplied output path consistently across ALL tools.
+
+    Handles the shortcuts the model naturally uses so files never land in the
+    wrong folder:
+      • 'desktop:foo.xlsx'   → <Desktop>/foo.xlsx
+      • 'downloads:foo.pdf'  → <Downloads>/foo.pdf
+      • '~', env vars        → expanded
+      • relative paths       → resolved against the active workspace if one is set,
+                               else the Desktop (a sensible default for outputs).
+    Absolute paths are returned unchanged.
+    """
+    import os as _os
+    s = str(p or "").strip()
+    low = s.lower()
+    if low.startswith("desktop:"):
+        return _os.path.join(str(DESKTOP_DIR), s.split(":", 1)[1].strip().lstrip("/\\"))
+    if low.startswith("downloads:"):
+        return _os.path.join(str(DOWNLOADS_DIR), s.split(":", 1)[1].strip().lstrip("/\\"))
+    expanded = _os.path.expandvars(_os.path.expanduser(s))
+    if _os.path.isabs(expanded):
+        return expanded
+    # Relative → workspace, else Desktop.
+    try:
+        from core.workspace_state import get_workspace
+        ws = get_workspace()
+    except Exception:
+        ws = ""
+    base = ws if ws else str(DESKTOP_DIR)
+    return _os.path.join(base, expanded)
 
 # ── Browser ─────────────────────────────────────────────────────────────────
 BROWSER_HEADLESS: bool = _get("BROWSER_HEADLESS", "false").lower() == "true"
 BROWSER_USER_DATA_DIR: Path = ROOT_DIR / ".browser_profile"
 
 # ── Safety / HITL ────────────────────────────────────────────────────────────
+# Set AGENT_UNRESTRICTED=true in .env to disable ALL safety confirmations.
+# The agent will execute every command immediately without asking for approval.
+# Recommended for trusted local use — the agent treats the machine as its own.
+AGENT_UNRESTRICTED: bool = os.getenv("AGENT_UNRESTRICTED", "true").lower() in ("true", "1", "yes")
+
 DESTRUCTIVE_PATTERNS: tuple[str, ...] = (
+    # Empty when AGENT_UNRESTRICTED=true — no command will trigger a HITL pause.
+    # Patterns below are only active when AGENT_UNRESTRICTED=false.
+) if AGENT_UNRESTRICTED else (
     "Remove-Item -Recurse",
     "rm -rf",
     "rmdir /s",
@@ -148,7 +218,8 @@ AVAILABLE_PROVIDERS: dict[str, dict] = {
         "label": "Anthropic Claude",
         "icon": "🟠",
         "key_var": "ANTHROPIC_API_KEY",
-        "models": ["claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-haiku-4-5-20251001"],
+        "models": ["claude-sonnet-4-6", "claude-sonnet-4-5-20250929", "claude-opus-4-8",
+                   "claude-haiku-4-5-20251001", "claude-sonnet-4-20250514"],
     },
     "openai": {
         "label": "OpenAI ChatGPT",

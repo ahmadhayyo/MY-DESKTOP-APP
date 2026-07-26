@@ -64,6 +64,15 @@ def compile_graph():
     if _COMPILED_GRAPH is not None:
         return _COMPILED_GRAPH
 
+    # ── Housekeeping: prune the checkpoint DB BEFORE the saver opens it ────────
+    # Runs only when the DB has grown past a threshold; keeps every graph step
+    # fast and stops agent_memory.db from ballooning to tens of MB.
+    try:
+        from core.maintenance import auto_prune_if_needed
+        auto_prune_if_needed(_DB_PATH, size_trigger_mb=25)
+    except Exception as exc:
+        logger.warning("Startup DB prune skipped: %s", exc)
+
     builder = StateGraph(AgentState)
     builder.add_node("planner", planner_node)
     builder.add_node("worker", worker_node)
@@ -74,7 +83,7 @@ def compile_graph():
     builder.add_conditional_edges(
         "reviewer",
         should_continue,
-        {"worker": "worker", "__end__": END},
+        {"worker": "worker", "planner": "planner", "__end__": END},
     )
 
     _COMPILED_GRAPH = builder.compile(checkpointer=_build_checkpointer())

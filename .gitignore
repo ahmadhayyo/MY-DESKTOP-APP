@@ -9,19 +9,29 @@ __pycache__/
 venv/
 .venv/
 
-# Local data (not source)
-agent_memory.db
-agent_memory.db-shm
-agent_memory.db-wal
-agent_memory.db.old.*
-conversations.db
-conversations.db-shm
-conversations.db-wal
-task_history.db
+# Local data (not source) — ALL SQLite databases + WAL/SHM sidecars are runtime
+# state, never source. Glob patterns catch every DB the app creates.
+*.db
+*.db-shm
+*.db-wal
+*.db.old.*
+*.sqlite
+*.sqlite3
 integrations.json
 last_session.json
+agent_facts.json
+scheduled_jobs.json
+# Telegram (Telethon) session = login credentials, NEVER commit
+telegram_user.session
+*.session
+*.session-journal
+
+# Forged tools the agent writes for itself at runtime (user-generated, not source)
+tools/dynamic/*.py
+!tools/dynamic/__init__.py
 .browser_profile/
 .files/
+logs/
 
 # Secrets
 .env
@@ -35,3 +45,18 @@ Thumbs.db
 # Test artifacts
 test_voice.mp3
 *.tmp
+
+# Build artifacts (PyInstaller etc.) — not source
+build/
+dist/
+_build/
+_dist/
+_spec/
+*_project/
+*.spec
+*.exe
+
+# Local backups (may contain secrets) — never commit
+.env.bak*
+.env.bak_*
+backup_history_*/

@@ -116,23 +116,162 @@ def browser_get_text(
     ] = "body",
     max_chars: Annotated[int, "Cap returned text length."] = 6000,
 ) -> str:
-    """Read visible text from the current page (or a specific element)."""
+    """Read visible text from the current page (or a specific element).
+
+    Waits for the page to finish loading and retries until real content appears
+    (handles JavaScript-rendered pages), so it no longer returns empty/duplicate
+    results. For clean article/study extraction prefer read_webpage().
+    """
 
     async def _do():
         await _ensure_browser()
-        try:
-            text = await _page.inner_text(selector, timeout=10000)
-        except Exception:
-            text = await _page.content()
-        return text
+        # 1. Let the page settle — many sites render content via JS after load.
+        for state, to in (("domcontentloaded", 15000), ("networkidle", 7000)):
+            try:
+                await _page.wait_for_load_state(state, timeout=to)
+            except Exception:
+                pass
+        # 2. Retry inner_text until it returns real content (JS hydration).
+        text = ""
+        for attempt in range(4):
+            try:
+                text = await _page.inner_text(selector, timeout=10000)
+            except Exception:
+                text = ""
+            if text and text.strip():
+                break
+            await _page.wait_for_timeout(1200)
+        # 3. Last resort: pull innerText straight from the DOM via JS.
+        if not (text and text.strip()):
+            try:
+                text = await _page.evaluate(
+                    "(sel) => { const el = sel === 'body' ? document.body : "
+                    "document.querySelector(sel); return el ? el.innerText : ''; }",
+                    selector,
+                )
+            except Exception:
+                text = ""
+        return text or ""
 
     try:
         text = _run(_do())
     except Exception as exc:
         return f"[ERROR] {type(exc).__name__}: {exc}"
+
+    if not text.strip():
+        return ("[EMPTY] الصفحة لم تُرجع نصاً — قد تكون خلف تحقق/تسجيل دخول، أو "
+                "محتواها صور فقط، أو لم تُحمّل بعد. جرّب read_webpage(url=...) أو "
+                "browser_screenshot() لرؤية ما يظهر، ولا تُعد استدعاء نفس الأمر.")
     if len(text) > max_chars:
         return text[:max_chars] + f"\n\n...[truncated, total={len(text)} chars]"
     return text
+
+
+# JS that extracts the main article/content block + title + code blocks,
+# non-destructively (does not modify the live page).
+_READABILITY_JS = r"""
+() => {
+  const title = document.title || '';
+  // Candidate containers, most-specific first.
+  const selectors = ['article','main','[role=main]','.post-content','.article-content',
+    '.entry-content','.markdown-body','#content','.content','.post','.article'];
+  let best = null, bestLen = 0;
+  for (const s of selectors) {
+    document.querySelectorAll(s).forEach(el => {
+      const t = (el.innerText || '').trim();
+      if (t.length > bestLen) { bestLen = t.length; best = el; }
+    });
+  }
+  const root = (best && bestLen > 200) ? best : document.body;
+  // Collect code blocks separately so technical content is preserved verbatim.
+  const codes = [];
+  (root || document).querySelectorAll('pre, code').forEach(c => {
+    const t = (c.innerText || '').trim();
+    if (t.length > 20) codes.push(t);
+  });
+  return { title, text: (root ? root.innerText : ''), codeBlocks: codes.slice(0, 30) };
+}
+"""
+
+
+@tool
+def read_webpage(
+    url: Annotated[str, "Page URL to read. Leave empty to read the page already open."] = "",
+    max_chars: Annotated[int, "Cap on returned text length."] = 8000,
+    include_code: Annotated[bool, "Append code blocks verbatim (for technical/study pages)."] = True,
+) -> str:
+    """Open a web page and extract its MAIN readable content (study/article/docs).
+
+    This is the right tool for research: it navigates, waits for JS to render,
+    then pulls the primary article text (skipping nav/ads/footers) plus any code
+    blocks verbatim. Do the whole thing in ONE call — pass the url here instead of
+    browser_open then browser_get_text. If the URL is a PDF, it says so; download
+    it with browser_download_to_desktop and read it with pdf_read.
+
+    Examples:
+      read_webpage(url='https://example.com/study')
+      read_webpage()                      # read the page already open
+    """
+    is_pdf = url.lower().split("?")[0].endswith(".pdf")
+    if is_pdf:
+        return ("📄 هذا الرابط ملف PDF. نزّله ثم اقرأه:\n"
+                f"   1) browser_download_to_desktop(url='{url}')\n"
+                "   2) pdf_read(path='<المسار المحفوظ>')")
+
+    async def _do():
+        await _ensure_browser()
+        if url:
+            await _page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        for state, to in (("domcontentloaded", 15000), ("networkidle", 8000)):
+            try:
+                await _page.wait_for_load_state(state, timeout=to)
+            except Exception:
+                pass
+        # Retry the extraction until the main block has real content.
+        result = {"title": "", "text": "", "codeBlocks": []}
+        for _ in range(4):
+            try:
+                result = await _page.evaluate(_READABILITY_JS)
+            except Exception:
+                result = {"title": "", "text": "", "codeBlocks": []}
+            if result.get("text", "").strip():
+                break
+            await _page.wait_for_timeout(1200)
+        cur_url = _page.url
+        return result, cur_url
+
+    try:
+        result, cur_url = _run(_do())
+    except Exception as exc:
+        return f"[ERROR] {type(exc).__name__}: {exc}"
+
+    title = (result.get("title") or "").strip()
+    body = (result.get("text") or "").strip()
+    codes = result.get("codeBlocks") or []
+
+    if not body:
+        return ("[EMPTY] لم أتمكّن من استخراج نص من الصفحة — قد تكون خلف Cloudflare/"
+                "تسجيل دخول أو محتواها ديناميكي. جرّب browser_screenshot() لرؤيتها، "
+                "أو افتح رابطاً بديلاً. لا تُعد نفس الاستدعاء.")
+
+    out = [f"📄 العنوان: {title}" if title else "📄 الصفحة:", f"🔗 {cur_url}", ""]
+    body_budget = max_chars
+    if include_code and codes:
+        body_budget = int(max_chars * 0.6)
+    out.append(body[:body_budget] + ("…[مقتطع]" if len(body) > body_budget else ""))
+
+    if include_code and codes:
+        out.append("\n────── أكواد مستخرجة من الصفحة ──────")
+        shown = 0
+        for i, c in enumerate(codes, 1):
+            block = f"\n[كود {i}]\n{c}"
+            if shown + len(block) > max_chars:
+                out.append(f"\n…[{len(codes) - i + 1} كتلة كود إضافية مقتطعة]")
+                break
+            out.append(block)
+            shown += len(block)
+
+    return "\n".join(out)
 
 
 @tool

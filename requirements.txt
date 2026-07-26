@@ -27,8 +27,7 @@ requests>=2.32.3
 # Async support
 aiofiles>=23.2.1
 
-# Web Search & Download
-duckduckgo-search>=6.0.0
+# Web Search & Download (ddgs is the maintained successor to duckduckgo-search)
 yt-dlp>=2024.1.0
 
 # Desktop GUI Automation (open apps, click, type, screenshot)
@@ -50,9 +49,14 @@ pywin32>=306; sys_platform == "win32"
 # Pretty CLI logging
 rich>=13.7.0
 
-# Office Documents (Excel, Word, PDF)
+# Trust the OS (Windows) certificate store — fixes SSL failures behind a VPN /
+# corporate proxy that does TLS interception (e.g. Anthropic/Gemini connection errors)
+pip-system-certs>=4.0; sys_platform == "win32"
+
+# Office Documents (Excel, Word, PowerPoint, PDF)
 openpyxl>=3.1.2
 python-docx>=1.1.0
+python-pptx>=1.0.0
 pypdf>=4.0.0
 reportlab>=4.1.0
 
@@ -66,3 +70,22 @@ pydantic>=2.7.0
 edge-tts>=7.0.0
 groq>=0.9.0
 openai>=1.40.0
+ddgs>=9.0.0
+
+# PowerPoint authoring
+python-pptx>=1.0.0
+
+# Telegram (user account via MTProto — search groups & download files)
+telethon>=1.36.0
+
+# Market data & charts (TwelveData feed + candlestick charts)
+matplotlib>=3.7.0
+
+# Desktop app building (write code → compile a Windows .exe)
+pyinstaller>=6.0.0
+pyflakes>=3.0.0
+
+# Google Drive integration
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
