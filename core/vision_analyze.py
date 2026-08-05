@@ -158,9 +158,10 @@ def _build_vision_llm(provider: str):
 
     if provider == "google":
         from langchain_google_genai import ChatGoogleGenerativeAI
+        # transport="rest" — required for "AQ."-style keys (gRPC → 403).
         return ChatGoogleGenerativeAI(
             model=model, google_api_key=key, temperature=0.0,
-            max_output_tokens=max_tokens,
+            transport="rest", max_output_tokens=max_tokens,
         ), model
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic

@@ -178,6 +178,9 @@ def _build_llm(role: Literal["main", "summarizer"], provider: str | None = None)
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         api_key = get_active_key("google", "GOOGLE_API_KEY")
+        # transport="rest" is REQUIRED for newer "AQ."-style Google API keys —
+        # the default gRPC transport rejects them with 403 PERMISSION_DENIED even
+        # though the exact same key works over REST. (Verified live 2026-08.)
         if role == "main":
             model_name = os.getenv("GOOGLE_AGENT_MODEL", "gemini-2.5-flash")
             return ChatGoogleGenerativeAI(
@@ -185,6 +188,7 @@ def _build_llm(role: Literal["main", "summarizer"], provider: str | None = None)
                 google_api_key=api_key,
                 temperature=0.0,
                 streaming=True,
+                transport="rest",
                 convert_system_message_to_human=False,
             )
         else:
@@ -193,6 +197,7 @@ def _build_llm(role: Literal["main", "summarizer"], provider: str | None = None)
                 model=model_name,
                 google_api_key=api_key,
                 temperature=0.0,
+                transport="rest",
                 max_output_tokens=2_048,
             )
 
@@ -776,18 +781,41 @@ def _anthropic_cached_tools(tools: list) -> list:
     return converted
 
 
-def _build_tools_binding(provider: str | None = None):
+def _build_tools_binding(provider: str | None = None, model_override: str | None = None):
     """Build the LLM+tools binding, using ReAct for non-capable models.
 
     `provider` builds a binding for a NON-active provider (used to construct the
     fallback chain). In that mode the ReAct globals are left alone — they belong
     to the active provider and clobbering them would mis-parse its output.
+
+    `model_override` forces a specific model for this binding (used to chain
+    SEVERAL omniroute free models as successive fallbacks, e.g. DeepSeek then
+    big-pickle then nemotron — each is the same "omniroute" provider but a
+    different underlying model).
     """
     global _react_mode, _react_tool_prompt, _is_offline
 
-    is_fallback = provider is not None and provider != _PROVIDER
+    is_fallback = (provider is not None and provider != _PROVIDER) or bool(model_override)
     prov = (provider or _PROVIDER).lower().strip()
-    main = _build_llm("main", provider=prov) if is_fallback else _get_main_llm()
+    if is_fallback and model_override:
+        # Temporarily point the provider's model env at the override so
+        # _build_llm picks it up, then restore — keeps _build_llm signature clean.
+        _env_var = {"omniroute": "OMNIROUTE_AGENT_MODEL", "google": "GOOGLE_AGENT_MODEL",
+                    "openai": "OPENAI_AGENT_MODEL", "deepseek": "DEEPSEEK_AGENT_MODEL",
+                    "groq": "GROQ_AGENT_MODEL"}.get(prov, "")
+        _saved = os.getenv(_env_var) if _env_var else None
+        if _env_var:
+            os.environ[_env_var] = model_override
+        try:
+            main = _build_llm("main", provider=prov)
+        finally:
+            if _env_var:
+                if _saved is None:
+                    os.environ.pop(_env_var, None)
+                else:
+                    os.environ[_env_var] = _saved
+    else:
+        main = _build_llm("main", provider=prov) if is_fallback else _get_main_llm()
 
     # Check connectivity
     _is_offline = not check_internet(timeout=2.0)
@@ -898,6 +926,7 @@ _PROVIDER_KEY_VARS = {
     "deepseek": "DEEPSEEK_API_KEY",
     "groq": "GROQ_API_KEY",
     "ollama": "",          # local, needs no key
+    "omniroute": "",       # local gateway, keyless free models
 }
 
 
@@ -911,17 +940,33 @@ def _provider_configured(prov: str) -> bool:
     return bool(val) and "your_" not in val.lower() and "_here" not in val.lower()
 
 
-def _fallback_providers() -> list[str]:
-    """Providers to try after the active one, in order, skipping unconfigured."""
+def _fallback_providers() -> list[tuple[str, str | None]]:
+    """(provider, model_override) pairs to try after the active one, in order.
+
+    Chain entries may be a bare provider ("google") or "provider:model"
+    ("omniroute:oc/big-pickle") to chain several models of the SAME provider as
+    successive fallbacks. Unconfigured providers are skipped. De-dup is on the
+    (provider, model) pair so multiple omniroute models can coexist.
+    """
     raw = os.getenv("PROVIDER_FALLBACK_CHAIN", _DEFAULT_FALLBACK_CHAIN)
     if not raw.strip():
         return []
-    seen = {_PROVIDER}
-    out = []
-    for p in (x.strip().lower() for x in raw.split(",")):
-        if p and p not in seen and _provider_configured(p):
-            seen.add(p)
-            out.append(p)
+    seen: set[tuple[str, str | None]] = set()
+    active_model = os.getenv("OMNIROUTE_AGENT_MODEL") if _PROVIDER == "omniroute" else None
+    seen.add((_PROVIDER, active_model))
+    out: list[tuple[str, str | None]] = []
+    for entry in (x.strip() for x in raw.split(",")):
+        if not entry:
+            continue
+        if ":" in entry and not entry.lower().startswith(("http",)):
+            prov, _, model = entry.partition(":")
+            prov, model = prov.strip().lower(), model.strip()
+        else:
+            prov, model = entry.lower(), None
+        key = (prov, model)
+        if key not in seen and _provider_configured(prov):
+            seen.add(key)
+            out.append(key)
     return out
 
 
@@ -930,20 +975,21 @@ def _get_llm_with_tools() -> BaseChatModel:
     global _llm_with_tools
     if _llm_with_tools is None:
         primary = _build_tools_binding()
+        chain = _fallback_providers()
         fallbacks = []
-        for prov in _fallback_providers():
+        for prov, model in chain:
             try:
-                fallbacks.append(_build_tools_binding(provider=prov))
+                fallbacks.append(_build_tools_binding(provider=prov, model_override=model))
             except Exception as exc:
-                logger.debug("Fallback provider '%s' unavailable: %s", prov, exc)
+                logger.debug("Fallback '%s%s' unavailable: %s",
+                             prov, f":{model}" if model else "", exc)
         if fallbacks:
             # Broad on purpose: provider SDKs raise wildly different exception
             # types for quota/auth/network, and a stalled task is worse to this
-            # agent than an extra retry on the next provider.
-            logger.info(
-                "Provider fallback chain: %s → %s",
-                _PROVIDER, " → ".join(_fallback_providers()),
-            )
+            # agent than an extra retry on the next provider. State is preserved
+            # across the switch (same messages passed) — no re-doing prior work.
+            _labels = [f"{p}:{m}" if m else p for p, m in chain]
+            logger.info("Provider fallback chain: %s → %s", _PROVIDER, " → ".join(_labels))
             _llm_with_tools = primary.with_fallbacks(fallbacks)
         else:
             _llm_with_tools = primary
