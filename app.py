@@ -143,6 +143,12 @@ _PROVIDERS = {
         "model_var": "OLLAMA_AGENT_MODEL",
         "default_model": "dolphin3",
     },
+    "omniroute": {
+        "label": "OmniRoute (بوّابة مجانية)",
+        "icon": "🆓",
+        "model_var": "OMNIROUTE_AGENT_MODEL",
+        "default_model": "auto",
+    },
 }
 
 
@@ -477,6 +483,7 @@ async def _run_graph(input_or_command, config: dict) -> None:
     active_step:       cl.Step | None = None   # top-level phase (plan/execute/review)
     worker_step:       cl.Step | None = None   # current tool sub-step
     worker_step_count: int = 0
+    current_tool_name: str = ""                # tool owning the open worker_step
     plan_steps:        list[str] = []
     planner_buf:       list[str] = []   # accumulates planner output for plan parsing
     reviewer_buf:      list[str] = []   # filtered reviewer text → step display
@@ -530,6 +537,24 @@ async def _run_graph(input_or_command, config: dict) -> None:
             pass
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Phase headers resolve from "in progress" to a completed summary when the
+    # phase ends, so a finished run reads as a log of what happened instead of a
+    # column of spinners frozen mid-sentence.
+    _PHASE_RUNNING = {
+        "planner":  "🧠 يفكّر ويخطّط…",
+        "worker":   "⚡ ينفّذ…",
+        "reviewer": "🔍 يراجع…",
+    }
+
+    def _phase_done_label(node: str) -> str:
+        if node == "planner":
+            return f"🧠 خطّط ({len(plan_steps)} خطوة)" if plan_steps else "🧠 خطّط"
+        if node == "worker":
+            return f"⚡ نفّذ ({worker_step_count} أداة)" if worker_step_count else "⚡ نفّذ"
+        if node == "reviewer":
+            return "🔍 راجع"
+        return node
+
     async def _close_worker_step() -> None:
         nonlocal worker_step
         if worker_step:
@@ -539,6 +564,8 @@ async def _run_graph(input_or_command, config: dict) -> None:
     async def _close_active_step() -> None:
         nonlocal active_step
         if active_step:
+            if current_node:
+                active_step.name = _phase_done_label(current_node)
             await active_step.__aexit__(None, None, None)
             active_step = None
 
@@ -548,6 +575,60 @@ async def _run_graph(input_or_command, config: dict) -> None:
         s = re.sub(r'\(.*?\)', '', s).strip()   # remove (url='...') etc.
         s = re.sub(r'\→.*$', '', s).strip()     # remove → description
         return s or raw
+
+    # ── Tool invocation rendering ────────────────────────────────────────────
+    # Args stream in as partial JSON fragments across many chunks, so we buffer
+    # them per tool-call and re-label the step once the JSON parses. This is what
+    # turns "🔧 read_file" into "🔧 read_file(path=config.py)" — i.e. *what* ran,
+    # not just which tool.
+    tool_args_buf: dict[str, list[str]] = {}
+
+    def _fmt_tool_label(tool_name: str, args_json: str) -> str:
+        """Render an invocation label: tool(key=value, …)."""
+        try:
+            args = json.loads(args_json) if args_json.strip() else {}
+        except Exception:
+            return f"🔧 {tool_name}"
+        if not isinstance(args, dict) or not args:
+            return f"🔧 {tool_name}()"
+        parts = []
+        for k, v in list(args.items())[:3]:
+            s = str(v).replace("\n", " ").strip()
+            if len(s) > 44:
+                s = s[:41] + "…"
+            parts.append(f"{k}={s}")
+        more = ", …" if len(args) > 3 else ""
+        return f"🔧 {tool_name}({', '.join(parts)}{more})"
+
+    # Failure markers scanned for in the head of a tool result. Tools here report
+    # errors as ordinary return values rather than raising, and rarely put the
+    # marker first (e.g. list_dir returns a path line, THEN "Permission denied"),
+    # so a startswith() check silently labels real failures as successes.
+    # Word boundaries keep "errors" from matching inside unrelated words.
+    _ERR_RE = re.compile(
+        r"❌|traceback \(most recent call last\)|permission denied|access is denied"
+        r"|winerror|errno|no such file|not found"
+        r"|\b(?:error|errors|exception|failed|failure|denied)\b"
+        r"|فشل|تعذّر|تعذر|خطأ|غير موجود|مرفوض|رُفض",
+        re.IGNORECASE,
+    )
+    # "0 errors" / "no failures" are success reports, not failures — strip them
+    # before scanning so a clean test run isn't flagged red.
+    _ERR_NEGATED_RE = re.compile(
+        r"\b(?:0|no|zero)\s+(?:errors?|failures?|exceptions?)\b", re.IGNORECASE
+    )
+
+    def _summarize_tool_result(result: str) -> tuple[str, bool]:
+        """Return (one-line summary, ok) so the step header shows the outcome."""
+        stripped = result.strip()
+        head = _ERR_NEGATED_RE.sub("", stripped[:400])
+        ok = not _ERR_RE.search(head)
+        if not stripped:
+            return "بلا مخرجات", ok
+        n_lines = stripped.count("\n") + 1
+        size = len(stripped)
+        size_txt = f"{size / 1024:.1f} ك.ب" if size >= 1024 else f"{size} حرفًا"
+        return (f"{n_lines} سطرًا · {size_txt}" if n_lines > 1 else size_txt), ok
 
     async def _flush_line_buf_to(dest: str) -> None:
         """Flush accumulated partial-line buffer to the given destination."""
@@ -563,7 +644,7 @@ async def _run_graph(input_or_command, config: dict) -> None:
             if filtered.strip():
                 reviewer_buf.append(filtered)       # filtered → step display
                 if active_step:
-                    active_step.output = (active_step.output or "") + filtered
+                    await active_step.stream_token(filtered)
             return
 
         filtered = _filter_internal_tokens(raw)
@@ -573,9 +654,9 @@ async def _run_graph(input_or_command, config: dict) -> None:
             await response_msg.stream_token(filtered)
             final_text_buf.append(filtered)
         elif dest == "active_step" and active_step:
-            active_step.output = (active_step.output or "") + filtered
+            await active_step.stream_token(filtered)
         elif dest == "worker_step" and worker_step:
-            worker_step.output = (worker_step.output or "") + filtered
+            await worker_step.stream_token(filtered)
         # "discard" → just drop (worker reasoning before first tool call)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -621,10 +702,14 @@ async def _run_graph(input_or_command, config: dict) -> None:
                         full = "".join(planner_buf)
                         plan_steps = _parse_plan_steps(full)
                         if active_step and plan_steps:
-                            plan_content = "**📋 الخطوات المخططة:**"
+                            # Append the parsed plan *below* the streamed reasoning
+                            # rather than replacing it — the thinking is now visible
+                            # live, and overwriting it would wipe what the user just
+                            # watched appear.
+                            plan_content = "\n\n**📋 الخطوات المخططة:**"
                             for i, s in enumerate(plan_steps, 1):
                                 plan_content += f"\n{i}. {_clean_plan_label(s)}"
-                            active_step.output = plan_content
+                            await active_step.stream_token(plan_content)
 
                 # Leaving worker → close its sub-step
                 if current_node == "worker":
@@ -634,20 +719,14 @@ async def _run_graph(input_or_command, config: dict) -> None:
                 await _close_active_step()
 
                 # Open new top-level phase step nested under response_msg
-                if node == "planner":
-                    active_step = cl.Step(name="🧠 يخطط... | Planning", type="run",
+                if node in _PHASE_RUNNING:
+                    active_step = cl.Step(name=_PHASE_RUNNING[node], type="run",
                                           parent_id=_parent_id)
                     await active_step.__aenter__()
-                    planner_buf.clear()
-                elif node == "worker":
-                    active_step = cl.Step(name="⚡ ينفذ... | Executing", type="run",
-                                          parent_id=_parent_id)
-                    await active_step.__aenter__()
-                    worker_step_count = 0
-                elif node == "reviewer":
-                    active_step = cl.Step(name="🔍 يراجع... | Reviewing", type="run",
-                                          parent_id=_parent_id)
-                    await active_step.__aenter__()
+                    if node == "planner":
+                        planner_buf.clear()
+                    elif node == "worker":
+                        worker_step_count = 0
 
                 current_node = node
 
@@ -670,8 +749,11 @@ async def _run_graph(input_or_command, config: dict) -> None:
                                 raw = "".join(_line_buf)
                                 _line_buf.clear()
                                 filtered = _filter_internal_tokens(raw)
-                                if filtered.strip() and worker_step:
-                                    worker_step.output = (worker_step.output or "") + filtered
+                                if filtered.strip():
+                                    if worker_step:
+                                        await worker_step.stream_token(filtered)
+                                    elif active_step:
+                                        await active_step.stream_token(filtered)
                             await _close_worker_step()
                             worker_step_count += 1
                             label = f"🔧 {tool_name}"
@@ -680,6 +762,28 @@ async def _run_graph(input_or_command, config: dict) -> None:
                             worker_step = cl.Step(name=label, type="tool",
                                                    parent_id=_parent_id)
                             await worker_step.__aenter__()
+                            # Start a fresh arg buffer for this invocation.
+                            current_tool_name = tool_name
+                            tool_args_buf[worker_step.id] = []
+
+                        # Args arrive as partial JSON spread across many chunks.
+                        # Buffer them and re-label only once the JSON actually
+                        # parses, so the header settles on the real invocation
+                        # (path/command/url) instead of flickering through
+                        # half-written fragments.
+                        frag = tc.get("args") or ""
+                        if frag and worker_step and current_tool_name:
+                            buf = tool_args_buf.setdefault(worker_step.id, [])
+                            buf.append(frag)
+                            try:
+                                parsed = json.loads("".join(buf))
+                            except Exception:
+                                parsed = None            # still mid-stream
+                            if isinstance(parsed, dict):
+                                new_label = _fmt_tool_label(current_tool_name, "".join(buf))
+                                if new_label != worker_step.name:
+                                    worker_step.name = new_label
+                                    await worker_step.update()
 
                 if text:
                     _line_buf.append(text)
@@ -709,13 +813,17 @@ async def _run_graph(input_or_command, config: dict) -> None:
                                 else:
                                     # Task plan: step output only
                                     if active_step:
-                                        active_step.output = (active_step.output or "") + filtered
+                                        await active_step.stream_token(filtered)
 
                             elif node == "worker":
-                                # Worker reasoning/output: step only, never main bubble
+                                # Worker reasoning/output: step only, never main bubble.
+                                # Before the first tool call there is no worker_step
+                                # yet, so the reasoning that *leads to* the call would
+                                # be dropped — surface it on the phase step instead.
                                 if worker_step:
-                                    worker_step.output = (worker_step.output or "") + filtered
-                                # else discard (reasoning before first tool call)
+                                    await worker_step.stream_token(filtered)
+                                elif active_step:
+                                    await active_step.stream_token(filtered)
 
                             elif node == "reviewer":
                                 # RAW text tracked per-iteration for verdict detection
@@ -723,7 +831,7 @@ async def _run_graph(input_or_command, config: dict) -> None:
                                 # Filtered text goes to step display only
                                 reviewer_buf.append(filtered)
                                 if filtered.strip() and active_step:
-                                    active_step.output = (active_step.output or "") + filtered
+                                    await active_step.stream_token(filtered)
                 continue
 
             # ── ToolMessage → show result inside current worker sub-step ──
@@ -734,9 +842,15 @@ async def _run_graph(input_or_command, config: dict) -> None:
                     else str(msg_chunk.content)
                 )
                 if worker_step and result:
+                    summary, ok = _summarize_tool_result(result)
+                    # Outcome goes in the header so a collapsed step still tells
+                    # you whether it worked; the body keeps the actual output.
+                    worker_step.name = f"{'✅' if ok else '❌'} {worker_step.name.lstrip('🔧⚙️ ')} — {summary}"
                     trunc = result[:600] + ("…(مقتطع)" if len(result) > 600 else "")
-                    worker_step.output = (worker_step.output or "") + f"\n```\n{trunc}\n```"
+                    await worker_step.stream_token(f"\n```\n{trunc}\n```")
+                    tool_args_buf.pop(worker_step.id, None)
                     await _close_worker_step()
+                    current_tool_name = ""
                 continue
 
             # ── Full AIMessage (state-update, not a streaming chunk) ───────
@@ -751,7 +865,7 @@ async def _run_graph(input_or_command, config: dict) -> None:
                         if filtered.strip():
                             reviewer_buf.append(filtered)
                             if active_step:
-                                active_step.output = (active_step.output or "") + filtered
+                                await active_step.stream_token(filtered)
                     elif node == "planner":
                         filtered = _filter_internal_tokens(text)
                         if filtered.strip():
@@ -814,7 +928,12 @@ async def _run_graph(input_or_command, config: dict) -> None:
                 if filtered.strip():
                     reviewer_buf.append(filtered)
                     if active_step:
-                        active_step.output = (active_step.output or "") + filtered
+                        # In `finally`, so the stream may already be torn down by
+                        # the exception that got us here — never mask it.
+                        try:
+                            await active_step.stream_token(filtered)
+                        except Exception:
+                            active_step.output = (active_step.output or "") + filtered
             elif current_node == "planner" and is_conversational:
                 if filtered.strip():
                     await response_msg.stream_token(filtered)
@@ -1359,6 +1478,7 @@ _PROVIDER_KEY_VARS = {
     "deepseek": "DEEPSEEK_API_KEY",
     "groq": "GROQ_API_KEY",
     "ollama": "",  # local, no key
+    "omniroute": "",  # local gateway, no key needed (keyless free models)
 }
 
 
@@ -1373,7 +1493,11 @@ async def _apply_model_switch(new_provider: str) -> None:
         return
 
     key_var = _PROVIDER_KEY_VARS.get(new_provider, "")
-    api_key = "ollama-local" if new_provider == "ollama" else os.getenv(key_var, "").strip()
+    # Local/keyless providers don't need an API key.
+    if new_provider in ("ollama", "omniroute"):
+        api_key = f"{new_provider}-local"
+    else:
+        api_key = os.getenv(key_var, "").strip()
     if not api_key:
         await cl.Message(content=(
             f"❌ **مفتاح API غير موجود لـ {_PROVIDERS[new_provider]['label']}**\n\n"
@@ -2420,12 +2544,24 @@ async def on_message(message: cl.Message) -> None:
 
     # ── Continue / Resume detection ───────────────────────────────────────────
     if _is_continue_request(user_text):
-        # First try the current thread, then fall back to the resumable thread
-        # saved at on_chat_start (the old session's thread).
+        # "Continue" must stay in the CURRENT conversation and never jump to a
+        # different/old project. Only fall back to a previous session's thread if
+        # THIS conversation is brand-new (no activity yet) — the sole legitimate
+        # case: resuming a task after the app was closed/reopened. Otherwise
+        # jumping to _resumable_thread_id makes the agent silently switch to an
+        # unrelated old project + its old workspace (a real, confusing bug).
         _resume_candidates = [thread_id]
         _old_tid = cl.user_session.get("_resumable_thread_id")
         if _old_tid and _old_tid != thread_id:
-            _resume_candidates.append(_old_tid)
+            _current_is_fresh = False
+            try:
+                _cur_state = await GRAPH.aget_state({"configurable": {"thread_id": thread_id}})
+                _cur_msgs = (_cur_state.values.get("messages", []) if _cur_state else [])
+                _current_is_fresh = len(_cur_msgs) <= 1
+            except Exception:
+                _current_is_fresh = False
+            if _current_is_fresh:
+                _resume_candidates.append(_old_tid)
 
         for _try_tid in _resume_candidates:
             try:
