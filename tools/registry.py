@@ -442,6 +442,15 @@ def _load_subagent():
 _import_category("subagent", _load_subagent)
 
 # ═══════════════════════════════════════════════════════════
+# SELF-DIAGNOSTIC — the agent verifies its OWN capabilities live
+# ═══════════════════════════════════════════════════════════
+def _load_diagnostic():
+    from tools.diagnostic_tools import self_diagnose
+    return [self_diagnose]
+
+_import_category("diagnostic", _load_diagnostic)
+
+# ═══════════════════════════════════════════════════════════
 # WINDOWS POWER — Deep Windows OS control
 # ═══════════════════════════════════════════════════════════
 def _load_windows():

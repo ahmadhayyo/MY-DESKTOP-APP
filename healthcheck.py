@@ -198,9 +198,94 @@ def _websearch():
     return f"{len(r)} live results"
 
 
+# ── 15. True vision (image analysis) ──────────────────────────────────────────
+def _vision():
+    from core import vision_analyze
+    provs = vision_analyze.available_vision_providers()
+    assert provs, "no vision provider (add GOOGLE_API_KEY or ANTHROPIC_API_KEY)"
+    return f"providers = {provs}"
+
+
+# ── 16. Verify + visual gates (build→run→see→fix, incl. Android) ───────────────
+def _gates():
+    from core.verify_gate import verification_pending, visual_verification_pending
+    h = [{"name": "edit_file_replace", "args": {"path": "a.py"}, "result": "[OK]"}]
+    assert verification_pending(h).pending, "verify gate should arm after code edit"
+    a = [{"name": "android_launch_app", "args": {"package": "x"}, "result": "[OK]"}]
+    os.environ.setdefault("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
+    vp = visual_verification_pending(a).pending  # may be dormant w/o vision key
+    return f"verify=armed, android-visual={'armed' if vp else 'dormant(no vision key)'}"
+
+
+# ── 17. Live todo list ────────────────────────────────────────────────────────
+def _todo():
+    from core import todo
+    todo.clear_todos("_hc")
+    todo.write_todos("_hc", [{"id": "1", "content": "x", "status": "completed"}])
+    assert todo.progress("_hc") == (1, 1)
+    todo.clear_todos("_hc")
+    return "write/render/progress OK"
+
+
+# ── 18. Skills system ─────────────────────────────────────────────────────────
+def _skills():
+    from core import skills
+    names = [s.name for s in skills.load_all()]
+    assert names, "no skills loaded"
+    rel = skills.find_relevant("أصلح المشروع")
+    assert rel, "relevance matching failed"
+    return f"{len(names)} skills, auto-match OK"
+
+
+# ── 19. Persistent terminal session (venv-aware) ──────────────────────────────
+def _terminal():
+    from core import terminal_session
+    terminal_session.reset_session("_hc")
+    r = terminal_session.run_in_session("echo hc_ok", session_id="_hc", timeout=15)
+    terminal_session.reset_session("_hc")
+    assert r["output"] == "hc_ok", f"got {r}"
+    return "persistent shell OK"
+
+
+# ── 20. Sub-agent engine (depth guard) ────────────────────────────────────────
+def _subagent():
+    from core import subagent
+    from contextvars import copy_context
+    # verify depth guard blocks recursion
+    tok = subagent._depth.set(1)
+    try:
+        r = subagent.run_subagent("x")
+        assert "تكرار" in r or "recursion" in r.lower()
+    finally:
+        subagent._depth.reset(tok)
+    return "loop-guard OK"
+
+
+# ── 21. Whole-PC file/app search ──────────────────────────────────────────────
+def _locate():
+    from tools.locate_tools import find_on_computer
+    r = find_on_computer.invoke({"name": "python", "kind": "app", "deep": False, "max_results": 3})
+    assert isinstance(r, str)
+    return "find_on_computer OK"
+
+
+# ── 22. Provider wiring (google/openai/omniroute build) ───────────────────────
+def _providers():
+    from agent.nodes import _build_llm
+    built = []
+    for p in ("google", "openai", "omniroute"):
+        try:
+            _build_llm("main", p)
+            built.append(p)
+        except Exception:
+            pass
+    assert built, "no provider could be built"
+    return f"buildable: {built}"
+
+
 def main():
     print("=" * 60)
-    print("  HAYO — فحص صحة ما قبل العرض / Pre-demo health check")
+    print("  HAYO — فحص صحة شامل / Comprehensive capability check")
     print("=" * 60)
     check("1. Tool registry loads", _registry)
     check("2. OCR engine (vision)", _ocr)
@@ -216,6 +301,14 @@ def main():
     check("12. Desktop app builder (EXE)", _appbuilder)
     check("13. Integrations (live data)", _integrations, network=True)
     check("14. Web search (network)", _websearch, network=True)
+    check("15. True vision (image analysis)", _vision)
+    check("16. Verify + visual gates", _gates)
+    check("17. Live todo list", _todo)
+    check("18. Skills system", _skills)
+    check("19. Persistent terminal (venv)", _terminal)
+    check("20. Sub-agent engine", _subagent)
+    check("21. Whole-PC search", _locate)
+    check("22. Provider wiring", _providers)
 
     print()
     npass = sum(1 for s, _, _ in results if s == PASS)

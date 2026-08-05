@@ -83,11 +83,11 @@ def _get_int(name: str, default: int) -> int:
 
 
 # ── Provider selection ──────────────────────────────────────────────────────
-ProviderName = Literal["anthropic", "google", "openai", "deepseek", "groq", "ollama"]
+ProviderName = Literal["anthropic", "google", "openai", "deepseek", "groq", "ollama", "omniroute"]
 MODEL_PROVIDER: ProviderName = _get("MODEL_PROVIDER", "google").lower()  # type: ignore
-if MODEL_PROVIDER not in ("anthropic", "google", "openai", "deepseek", "groq", "ollama"):
+if MODEL_PROVIDER not in ("anthropic", "google", "openai", "deepseek", "groq", "ollama", "omniroute"):
     raise ValueError(
-        f"MODEL_PROVIDER must be 'anthropic', 'google', 'openai', 'deepseek', 'groq', or 'ollama', got '{MODEL_PROVIDER}'"
+        f"MODEL_PROVIDER must be 'anthropic', 'google', 'openai', 'deepseek', 'groq', 'ollama', or 'omniroute', got '{MODEL_PROVIDER}'"
     )
 
 # ── Anthropic ────────────────────────────────────────────────────────────────
@@ -104,8 +104,8 @@ GOOGLE_SUMMARIZER_MODEL: str = _get("GOOGLE_SUMMARIZER_MODEL", "gemini-2.5-flash
 
 # ── OpenAI (ChatGPT) ────────────────────────────────────────────────────────
 OPENAI_API_KEY: str = _get("OPENAI_API_KEY")
-OPENAI_AGENT_MODEL: str = _get("OPENAI_AGENT_MODEL", "gpt-4o")
-OPENAI_SUMMARIZER_MODEL: str = _get("OPENAI_SUMMARIZER_MODEL", "gpt-4o-mini")
+OPENAI_AGENT_MODEL: str = _get("OPENAI_AGENT_MODEL", "gpt-5.6-luna")
+OPENAI_SUMMARIZER_MODEL: str = _get("OPENAI_SUMMARIZER_MODEL", "gpt-5.4-nano")
 
 # ── DeepSeek ─────────────────────────────────────────────────────────────────
 DEEPSEEK_API_KEY: str = _get("DEEPSEEK_API_KEY")
@@ -225,7 +225,10 @@ AVAILABLE_PROVIDERS: dict[str, dict] = {
         "label": "OpenAI ChatGPT",
         "icon": "🟢",
         "key_var": "OPENAI_API_KEY",
-        "models": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
+        # gpt-5.6-* are routed through the Responses API (see _openai_api_kwargs
+        # in agent/nodes.py) — they reject function tools on chat/completions.
+        "models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol",
+                   "gpt-5.4-mini", "gpt-5.4-nano", "gpt-4o"],
     },
     "deepseek": {
         "label": "DeepSeek",
