@@ -471,6 +471,50 @@ def build_missed_speech(ev: dict) -> str:
             f"إن لم تكوني قد أخذتِه بعد، خذيه الآن رجاءً واعتني بنفسكِ.")
 
 
+def companion_summary() -> str:
+    """A tiny, plain-text snapshot of today's doses for the companion persona,
+    so she can ask 'شو دوائي اليوم؟' and get a real answer."""
+    rows = today_plan()
+    if not rows:
+        return "لا يوجد أدوية مُسجّلة اليوم."
+    parts = []
+    st = {"taken": "تم أخذه", "missed": "فات موعده", "skipped": "متروك",
+          "pending": "لسا"}
+    for r in rows:
+        food = " مع الأكل" if r["with_food"] else ""
+        parts.append(f"{r['med']} الساعة {r['slot']}{food} ({st.get(r['status'], r['status'])})")
+    return "؛ ".join(parts)
+
+
+def companion_system_prompt() -> str:
+    """The persona for general companionship chat with the patient — warm,
+    unhurried, Syrian dialect, spoken-friendly, and safe for an elder who is
+    sometimes alone. Personalised with her name and today's medicines."""
+    patient = get_patient()
+    meds = companion_summary()
+    return (
+        f"إنتِ رفيقة ذكية دافئة اسمها «هايو»، بتحكي مع {patient} — سيّدة كبيرة "
+        f"بالعمر بتكون أحياناً لحالها بالبيت، وابنها جهّزك تأنسها وتهتم فيها. "
+        "احكي معها باللهجة السورية الشامية، بكلام بسيط وحنون ومحترم. "
+        "\n\nقواعد مهمة:\n"
+        "- خلّي جوابك قصير (جملة لـ ثلاث جمل بالكتير) لأنه رح ينحكى بصوت عالي.\n"
+        "- كوني صبورة، لطيفة، ومتفهّمة. اسأليها عن يومها، عن ذكرياتها، عن ولادها، "
+        "عن الأكل والصلاة، وشجّعيها تشرب مي وتاكل وترتاح وتقعد بالشمس شوي.\n"
+        "- إذا سألت عن دوائها، جاوبيها من هالمعلومات: " + meds + ".\n"
+        "- ذكّريها بلطف بموعد الدوا إذا حان أو قرب، بلا إلحاح.\n"
+        "- إنتِ مو دكتورة: ما تشخّصي مرض ولا تنصحي بجرعات دوا. \n"
+        "- ⚠️ إذا اشتكت من وجع صدر، أو ضيق نفس، أو وقعة، أو نزيف، أو دوخة قوية، أو "
+        "تشوّش، أو أي شي خطير: بهدوء ووضوح خبّريها تتصل فوراً بابنها أو أهلها أو "
+        "بالإسعاف، وطمّنيها إنه رح يكونوا معها.\n"
+        "- إذا حسّيتها زعلانة أو حزينة أو وحيدة، احتوِها بحنان وشجّعيها تتواصل مع "
+        "أهلها وأحبابها.\n"
+        "- لا تحكي أبداً عن مصاري أو حسابات، ولا تطلبي منها كلمة سر أو رمز. "
+        "لا تخوّفيها ولا تكذبي عليها.\n"
+        "- بلا رموز تعبيرية وبلا إنكليزي إلا إذا هي حكت إنكليزي. جاوبي كإنك عم تحكي "
+        "معها وجهاً لوجه."
+    )
+
+
 def build_guardian_alert(ev: dict) -> str:
     patient = ev.get("patient") or "الوالدة"
     return (f"🔔 تنبيه الرعاية: لم يتم تأكيد أخذ {patient} لدواء "

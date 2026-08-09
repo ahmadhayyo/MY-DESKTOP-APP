@@ -173,5 +173,29 @@ class SpeechAndVoice(CareBase):
         self.assertEqual(g["telegram_chat_id"], "123")
 
 
+class Companion(CareBase):
+    def test_summary_lists_meds(self):
+        self.cm.add_medication("دواء الضغط", ["08:00"], with_food=True)
+        s = self.cm.companion_summary()
+        self.assertIn("دواء الضغط", s)
+        self.assertIn("08:00", s)
+
+    def test_summary_empty(self):
+        self.assertIn("لا يوجد", self.cm.companion_summary())
+
+    def test_persona_personalised_and_safe(self):
+        self.cm.set_patient("ماما فاطمة")
+        self.cm.add_medication("Insulin", ["07:00"])
+        p = self.cm.companion_system_prompt()
+        # addresses her by name
+        self.assertIn("ماما فاطمة", p)
+        # embeds today's meds so she can ask about them
+        self.assertIn("Insulin", p)
+        # carries the emergency-safety instruction
+        self.assertIn("الإسعاف", p)
+        # spoken-friendly: forbids emojis
+        self.assertIn("رموز", p)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -231,7 +231,10 @@ def _get_mode() -> str:
 
 
 def _set_mode(mode: str) -> None:
-    cl.user_session.set("chat_mode", "ask" if mode == "ask" else "agent")
+    if mode == "care":
+        cl.user_session.set("chat_mode", "care")
+    else:
+        cl.user_session.set("chat_mode", "ask" if mode == "ask" else "agent")
 
 
 async def _send_mode_ui(with_banner: bool = True) -> None:
@@ -324,6 +327,97 @@ async def _run_ask_mode(user_text: str, config: dict) -> None:
         )
     except Exception:
         pass
+
+
+async def _run_companion_mode(user_text: str, config: dict) -> None:
+    """Care companion chat: a warm, spoken, Syrian-dialect conversation for the
+    patient when she is alone. Chat-only (no tools/execution), voice-first, and
+    routed through the current provider — free when on OmniRoute/free models."""
+    from agent.nodes import _get_main_llm
+    from langchain_core.messages import SystemMessage as _Sys
+    from core import care_mode as _care
+
+    # Read-only prior context so the conversation feels continuous.
+    ctx_msgs: list = []
+    try:
+        st = await GRAPH.aget_state(config)
+        prior = (st.values or {}).get("messages", []) if st else []
+        ctx_msgs = [
+            m for m in prior
+            if isinstance(m, HumanMessage)
+            or (isinstance(m, AIMessage) and not getattr(m, "tool_calls", []))
+        ][-8:]
+    except Exception:
+        ctx_msgs = []
+
+    out = cl.Message(content="")
+    await out.send()
+    full: list[str] = []
+    try:
+        llm = _get_main_llm()
+        convo = [_Sys(content=_care.companion_system_prompt())] + ctx_msgs + \
+                [HumanMessage(content=user_text)]
+        async for chunk in llm.astream(convo):
+            piece = _extract_text_chunk(chunk)
+            if piece:
+                await out.stream_token(piece)
+                full.append(piece)
+    except Exception as exc:
+        await out.stream_token(f"\n\nآسفة يا قلبي، صار في خلل بسيط. ({exc})")
+    await out.update()
+
+    reply = "".join(full).strip()
+
+    # Always speak the reply aloud in her Syrian voice — this mode is voice-first.
+    if reply:
+        try:
+            audio = await text_to_speech(reply, voice=_care.get_voice(), rate="-6%")
+            if audio:
+                await cl.Message(content="🔊", elements=[cl.Audio(
+                    name="companion.mp3", content=audio, auto_play=True,
+                    mime="audio/mpeg")]).send()
+        except Exception:
+            pass
+
+    try:
+        await GRAPH.aupdate_state(
+            config,
+            {"messages": [HumanMessage(content=user_text),
+                          AIMessage(content=reply)]},
+        )
+    except Exception:
+        pass
+
+
+async def _enter_companion_mode() -> None:
+    """Switch into Care companion mode and greet her warmly, aloud."""
+    from core import care_mode as _care
+    _set_mode("care")
+    cl.user_session.set("voice_mode", True)
+    cl.user_session.set("voice_name", _care.get_voice())
+    patient = _care.get_patient()
+    hour = _dt.datetime.now().hour
+    if hour < 12:
+        greet = f"صباح الخير يا {patient}، نوّرتي. كيفك اليوم؟ شو عملتي الصبح؟"
+    elif hour < 18:
+        greet = f"مسا الخير يا {patient}، كيف ماشي نهارك؟ عم تاكلي شي طيّب؟"
+    else:
+        greet = f"مسا الخير يا {patient} الغالية، كيف كان يومك؟ قاعدة مرتاحة؟"
+    elems = []
+    try:
+        audio = await text_to_speech(greet, voice=_care.get_voice(), rate="-6%")
+        if audio:
+            elems.append(cl.Audio(name="companion_hello.mp3", content=audio,
+                                  auto_play=True, mime="audio/mpeg"))
+    except Exception:
+        pass
+    await cl.Message(
+        content=(f"💛 **وضع الرفيق مُفعّل** — بحكي مع {patient} باللهجة السورية "
+                 f"وبصوت عالي. (للخروج اكتب `/agent` أو `/ask`)\n\n> {greet}"),
+        elements=elems,
+        actions=[cl.Action(name="care_voice_toggle", payload={},
+                           label="🔊 بدّل صوت (ذكر/أنثى)")],
+    ).send()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1918,9 +2012,10 @@ async def _on_pick_workspace(action: cl.Action):
 async def set_starters():
     """Ready-made, organized action cards shown on a new chat (click to run)."""
     return [
-        # ── Mode toggle (Ask / Agent) ──
+        # ── Mode toggle (Ask / Agent / Companion) ──
         cl.Starter(label="💬 وضع السؤال (Ask)", message="/ask"),
         cl.Starter(label="⚙️ وضع الوكيل (Agent)", message="/agent"),
+        cl.Starter(label="💛 وضع الرفيق (لأمي)", message="/رفيق"),
         # ── Control & setup ──
         cl.Starter(label="🎛️ لوحة التحكّم", message="/panel"),
         cl.Starter(label="🔄 تغيير النموذج", message="/model"),
@@ -2696,6 +2791,16 @@ async def on_message(message: cl.Message) -> None:
         await cl.Message(content=(
             "⚙️ **وضع الوكيل (Agent)** مُفعّل — أخطّط وأنفّذ المهام على جهازك."),
             actions=_quick_actions()).send()
+        return
+
+    # ── Care companion mode: warm, spoken, Syrian chat for a loved one ────────
+    if _ut_low in ("/care", "/رفيق", "/رعاية", "/الرعاية"):
+        await _enter_companion_mode()
+        return
+
+    # ── Companion enforcement: warm spoken chat, NEVER execute ───────────────
+    if _get_mode() == "care":
+        await _run_companion_mode(user_text, config)
         return
 
     # ── Ask-mode enforcement: chat only, NEVER execute ────────────────────────
