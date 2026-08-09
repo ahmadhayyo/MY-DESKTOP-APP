@@ -605,6 +605,16 @@ _import_category("ai_office", _load_ai_office)
 
 
 # ═══════════════════════════════════════════════════════════
+# DOC EXPANSION — expand a Word study precisely (keeps all tables)
+# ═══════════════════════════════════════════════════════════
+def _load_doc_expand():
+    from tools.doc_expand_tools import expand_study_document
+    return [expand_study_document]
+
+_import_category("doc_expand", _load_doc_expand)
+
+
+# ═══════════════════════════════════════════════════════════
 # INTEGRATIONS — real connectors (Discord/Slack/Telegram-bot/Email/Notion/HTTP/…)
 # ═══════════════════════════════════════════════════════════
 def _load_integrations():
