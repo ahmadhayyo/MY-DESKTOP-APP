@@ -593,6 +593,18 @@ _import_category("smart_office", _load_smart_office)
 
 
 # ═══════════════════════════════════════════════════════════
+# AI OFFICE — instruction + data → precise Excel/Word/PowerPoint
+# ═══════════════════════════════════════════════════════════
+def _load_ai_office():
+    from tools.ai_office_tools import (
+        ai_to_excel, ai_to_word, ai_to_powerpoint, ai_office,
+    )
+    return [ai_to_excel, ai_to_word, ai_to_powerpoint, ai_office]
+
+_import_category("ai_office", _load_ai_office)
+
+
+# ═══════════════════════════════════════════════════════════
 # INTEGRATIONS — real connectors (Discord/Slack/Telegram-bot/Email/Notion/HTTP/…)
 # ═══════════════════════════════════════════════════════════
 def _load_integrations():
