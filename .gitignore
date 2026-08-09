@@ -60,3 +60,6 @@ _spec/
 .env.bak*
 .env.bak_*
 backup_history_*/
+
+# Care Mode — personal medical data (never commit)
+care_data.json
