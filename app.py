@@ -1508,14 +1508,19 @@ async def _apply_model_switch(new_provider: str) -> None:
     from agent.nodes import switch_provider
     try:
         switch_provider(new_provider)
-        new_thread_id = str(uuid.uuid4())
         cl.user_session.set("current_provider", new_provider)
-        cl.user_session.set("thread_id", new_thread_id)
-        _save_session(new_thread_id, new_provider)
+        # KEEP the current conversation thread — do NOT start a fresh one. This
+        # preserves the full state (messages, completed steps, live todos, the
+        # project study) so switching models MID-TASK continues from exactly
+        # where it stopped instead of re-doing everything. The new provider picks
+        # up the same context on the next message. (Use /new for a fresh chat.)
+        _tid = cl.user_session.get("thread_id") or str(uuid.uuid4())
+        cl.user_session.set("thread_id", _tid)
+        _save_session(_tid, new_provider)
         await cl.Message(content=(
-            f"✅ **تم تغيير النموذج!**\n\n"
+            f"✅ **تم تغيير النموذج — والسياق محفوظ.**\n\n"
             f"الحالي: {_get_model_display(new_provider)}\n"
-            f"جلسة جديدة: `{new_thread_id[:8]}…`"
+            f"سيتابع من حيث توقفت في نفس المحادثة. (للبدء من جديد اكتب `/new`.)"
         )).send()
     except Exception as exc:
         await cl.Message(content=f"❌ خطأ في تغيير النموذج: {exc}").send()
