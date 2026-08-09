@@ -581,6 +581,18 @@ _import_category("care", _load_care)
 
 
 # ═══════════════════════════════════════════════════════════
+# SMART OFFICE — data→Excel + precise Office conversion (AR/EN)
+# ═══════════════════════════════════════════════════════════
+def _load_smart_office():
+    from tools.smart_office_tools import (
+        data_to_excel, office_convert, extract_tables,
+    )
+    return [data_to_excel, office_convert, extract_tables]
+
+_import_category("smart_office", _load_smart_office)
+
+
+# ═══════════════════════════════════════════════════════════
 # INTEGRATIONS — real connectors (Discord/Slack/Telegram-bot/Email/Notion/HTTP/…)
 # ═══════════════════════════════════════════════════════════
 def _load_integrations():
