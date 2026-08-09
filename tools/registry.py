@@ -565,6 +565,22 @@ _import_category("market", _load_market)
 
 
 # ═══════════════════════════════════════════════════════════
+# CARE MODE — medication & wellbeing companion (spoken reminders, free)
+# ═══════════════════════════════════════════════════════════
+def _load_care():
+    from tools.care_tools import (
+        care_add_medication, care_list_medications, care_mark_taken,
+        care_status, care_remove_medication, care_set_patient,
+        care_set_voice, care_set_guardian,
+    )
+    return [care_add_medication, care_list_medications, care_mark_taken,
+            care_status, care_remove_medication, care_set_patient,
+            care_set_voice, care_set_guardian]
+
+_import_category("care", _load_care)
+
+
+# ═══════════════════════════════════════════════════════════
 # INTEGRATIONS — real connectors (Discord/Slack/Telegram-bot/Email/Notion/HTTP/…)
 # ═══════════════════════════════════════════════════════════
 def _load_integrations():

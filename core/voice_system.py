@@ -42,13 +42,17 @@ import edge_tts
 # Curated list of natural-sounding Arabic + English voices.
 # Egyptian Arabic is the default — most widely understood across the region.
 VOICES = {
-    # Arabic
-    "salma":   "ar-EG-SalmaNeural",      # Female — Egyptian, warm (DEFAULT)
+    # Arabic — Levantine (Syria) first: closest dialect for a Syrian user
+    "amany":   "ar-SY-AmanyNeural",      # Female — Syrian (Levantine) 🇸🇾
+    "laith":   "ar-SY-LaithNeural",      # Male   — Syrian (Levantine) 🇸🇾
+    "salma":   "ar-EG-SalmaNeural",      # Female — Egyptian, warm
     "shakir":  "ar-EG-ShakirNeural",     # Male   — Egyptian
     "zariyah": "ar-SA-ZariyahNeural",    # Female — Saudi, MSA
     "hamed":   "ar-SA-HamedNeural",      # Male   — Saudi, MSA
     "laila":   "ar-LB-LaylaNeural",      # Female — Lebanese
     "rami":    "ar-LB-RamiNeural",       # Male   — Lebanese
+    "sana":    "ar-JO-SanaNeural",       # Female — Jordanian (Levantine)
+    "taim":    "ar-JO-TaimNeural",       # Male   — Jordanian (Levantine)
 
     # English
     "aria":    "en-US-AriaNeural",       # Female — US, friendly
@@ -56,7 +60,7 @@ VOICES = {
     "jenny":   "en-US-JennyNeural",      # Female — US, conversational
 }
 
-DEFAULT_VOICE_AR = "ar-EG-SalmaNeural"
+DEFAULT_VOICE_AR = os.getenv("HAYO_VOICE_AR", "ar-SY-AmanyNeural")  # Syrian female
 DEFAULT_VOICE_EN = "en-US-AriaNeural"
 
 

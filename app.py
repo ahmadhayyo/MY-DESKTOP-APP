@@ -1292,6 +1292,11 @@ async def _scheduler_loop() -> None:
                 await _run_scheduled_job(job)
         except Exception as exc:
             _logger.warning("Scheduler tick error: %s", exc)
+        # Care Mode — spoken medication reminders (model-free, always runs)
+        try:
+            await _run_care_reminders()
+        except Exception as exc:
+            _logger.warning("Care tick error: %s", exc)
         await asyncio.sleep(poll)
 
 
@@ -1336,6 +1341,160 @@ async def _run_scheduled_job(job: dict) -> None:
             await cl.Message(content=f"❌ فشلت المهمة المجدولة {job_id}: {exc}").send()
         except Exception:
             pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Care Mode — spoken medication reminders (a gift feature; costs zero model $$)
+# ─────────────────────────────────────────────────────────────────────────────
+async def _run_care_reminders() -> None:
+    """Fire any due Care Mode events this minute.
+
+    A `due` event → call her by name, aloud (edge-TTS), show a one-tap card, and
+    pop a Windows toast. A `missed` event → quietly alert the guardian. All of
+    this is model-free, so it keeps working even with zero AI credit."""
+    from core import care_mode as _care
+    for ev in _care.due_reminders():
+        try:
+            if ev.get("kind") == "missed":
+                await _care_alert_guardian(ev)
+            else:
+                await _care_announce(ev)
+        except Exception as exc:
+            _logger.warning("Care event failed: %s", exc)
+
+
+async def _care_announce(ev: dict) -> None:
+    """Speak the reminder aloud in a warm voice + on-screen card + toast."""
+    from core import care_mode as _care
+    speech = _care.build_reminder_speech(ev)
+
+    # 1) Speak it — Syrian voice (female/male per setting), slower for clarity.
+    audio_elems = []
+    try:
+        audio = await text_to_speech(speech, voice=_care.get_voice(), rate="-8%")
+        if audio:
+            audio_elems.append(cl.Audio(name="care.mp3", content=audio,
+                                        auto_play=True, mime="audio/mpeg"))
+    except Exception:
+        pass
+
+    # 2) On-screen card with a single big "she took it" button.
+    dose = f" — {ev['dose']}" if ev.get("dose") else ""
+    food = " · مع الطعام 🍽️" if ev.get("with_food") else ""
+    note = f"\n📝 {ev['notes']}" if ev.get("notes") else ""
+    card = (f"💊 **موعد دواء {ev['patient']}**\n\n"
+            f"## {ev['med']}{dose}\n"
+            f"🕐 الساعة {ev['slot']}{food}{note}\n\n> {speech}")
+    _vg = "🔊 صوت أنثى" if _care.get_voice_gender() == "female" else "🔊 صوت ذكر"
+    actions = [
+        cl.Action(name="care_taken",
+                  payload={"med_id": ev["med_id"], "slot": ev["slot"], "med": ev["med"]},
+                  label="✅ أخذتِ الدواء"),
+        cl.Action(name="care_voice_toggle", payload={}, label=f"{_vg} · بدّل"),
+    ]
+    try:
+        await cl.Message(content=card, elements=audio_elems, actions=actions).send()
+    except Exception:
+        pass
+
+    # 3) Windows toast — reaches her even if the chat window isn't in focus.
+    try:
+        from plyer import notification
+        notification.notify(title=f"💊 دواء {ev['med']} — {ev['slot']}",
+                            message=f"{ev['patient']}، حان موعد دوائكِ 💛",
+                            timeout=15, app_name="HAYO Care")
+    except Exception:
+        pass
+
+
+async def _care_alert_guardian(ev: dict) -> None:
+    """A dose slipped past its window — let the guardian know, gently."""
+    from core import care_mode as _care
+    alert = _care.build_guardian_alert(ev)
+    g = _care.get_guardian()
+    sent = []
+    # Telegram
+    if g.get("telegram_chat_id"):
+        try:
+            from tools.integration_tools import telegram_bot_send
+            telegram_bot_send.invoke({"text": alert, "chat_id": g["telegram_chat_id"]})
+            sent.append("تيليجرام")
+        except Exception:
+            pass
+    # Email
+    if g.get("email"):
+        try:
+            from tools.integration_tools import send_email
+            send_email.invoke({"to": g["email"], "subject": "🔔 تنبيه الرعاية — جرعة فائتة",
+                               "body": alert})
+            sent.append("بريد")
+        except Exception:
+            pass
+    # Always surface it in the chat too, spoken for her.
+    try:
+        speech = _care.build_missed_speech(ev)
+        elems = []
+        try:
+            audio = await text_to_speech(speech, voice=_care.get_voice(), rate="-8%")
+            if audio:
+                elems.append(cl.Audio(name="care_missed.mp3", content=audio,
+                                      auto_play=True, mime="audio/mpeg"))
+        except Exception:
+            pass
+        via = f" (نُبِّه وليّ الأمر عبر: {'، '.join(sent)})" if sent else ""
+        await cl.Message(
+            content=f"⚠️ **جرعة فائتة** — {ev['med']} ({ev['slot']}){via}\n\n> {speech}",
+            elements=elems,
+            actions=[cl.Action(name="care_taken",
+                               payload={"med_id": ev["med_id"], "slot": ev["slot"],
+                                        "med": ev["med"]},
+                               label="✅ أخذتُها الآن")],
+        ).send()
+    except Exception:
+        pass
+
+
+@cl.action_callback("care_taken")
+async def _on_care_taken(action: cl.Action):
+    """She (or the son) tapped 'taken' — record it and stop further reminders."""
+    from core import care_mode as _care
+    p = action.payload or {}
+    med_id = p.get("med_id", "")
+    slot = p.get("slot") or None
+    med_name = p.get("med", med_id)
+    try:
+        await action.remove()
+    except Exception:
+        pass
+    res = _care.mark(med_id, slot=slot, status="taken")
+    name = res["med"] if res else med_name
+    await cl.Message(content=(f"✅ تمّ — سجّلت أخذ **{name}**. "
+                              f"سلامتكِ يا غالية 💛")).send()
+
+
+@cl.action_callback("care_voice_toggle")
+async def _on_care_voice_toggle(action: cl.Action):
+    """Switch the reminder voice between the female and male Syrian voice, and
+    speak a short sample in the newly-selected voice so she hears the change."""
+    from core import care_mode as _care
+    try:
+        await action.remove()
+    except Exception:
+        pass
+    gender = _care.toggle_voice_gender()
+    label = "أنثى" if gender == "female" else "ذكر"
+    sample = (f"تمام، صار صوتي {'نسائي' if gender == 'female' else 'رجّالي'}. "
+              f"رح ذكّرك بدوائك بهالصوت.")
+    elems = []
+    try:
+        audio = await text_to_speech(sample, voice=_care.get_voice(), rate="-6%")
+        if audio:
+            elems.append(cl.Audio(name="voice_sample.mp3", content=audio,
+                                  auto_play=True, mime="audio/mpeg"))
+    except Exception:
+        pass
+    await cl.Message(content=f"🔊 تم اختيار **صوت {label}** (لهجة سورية).",
+                     elements=elems).send()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
